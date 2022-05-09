@@ -1,7 +1,7 @@
 import glob
 import numpy as np
 import h5py
-import time
+# import time
 from utils import recenter, approx_concentration, calc_delta_c, pretty_print
 import matplotlib.pyplot as plt
 from sphviewer.tools import QuickView
@@ -25,7 +25,7 @@ class Box():
     def read_snap(self, filename, verbose):
         
         if verbose:
-            start = time.time()
+            # start = time.time()
             print("LOADING {0}...".format(filename))
         
         snap = h5py.File(filename,'r')
@@ -56,8 +56,8 @@ class Box():
         
         snap.close()
         if verbose:
-            end = time.time()
-            print("...LOADED in {0} seconds\n".format(round(end-start, 2)))
+            # end = time.time()
+            # print("...LOADED in {0} seconds\n".format(round(end-start, 2)))
             self.box_info()
         
         return params
@@ -190,18 +190,16 @@ class Subhalo(Box):
         self.path = path
         self.snapshot = snapshot
         Box.__init__(self, path, snapshot, verbose=verbose)
-        if group_index is not None:
-            self.group_index = group_index
-            self.get_group_params(verbose)
-            self.group_coords = self.get_group_particle_positions()
-        else:
-            self.group_index = None
         if subhalo_index is not None:
             self.subhalo_index = subhalo_index
             self.get_subhalo_params(verbose)
             # self.subhalo_coords = self.get_subhalo_particle_positions()
         else:
             self.subhalo_index = None
+        if group_index is not None:
+            self.group_index = group_index
+            self.get_group_params(verbose)
+            self.group_coords = self.get_group_particle_positions()
         self.verbose = verbose
         if verbose and group_index is not None:
             self.group_info()
@@ -285,28 +283,33 @@ class Subhalo(Box):
         """
             
         most_bound_particle = self.subhalo['IDMostbound'][self.group_first_subhalo]
-        offset_grp = self.group_len
-        offset_sub = self.subhalo['Len'][self.group_index]
-        
         ind = np.where(self.ids == most_bound_particle)[0]
+        
+        offset_grp = self.group_len
         inds_grp = np.arange(ind, ind + offset_grp)
-        inds_sub = np.arange(ind, ind + offset_sub)
-        inds_rem = np.arange(ind + offset_sub, ind + offset_grp)
-        
-        # IDs_sub = self.ids[inds_sub]
         # IDs_grp = self.ids[inds_grp]
-        
         group_coords = self.coords[inds_grp] - self.group_position
-        group_coords = recenter(group_coords, boxsize=25)
-        subhalo_coords = self.coords[inds_sub] - self.group_position
-        subhalo_coords = recenter(subhalo_coords, boxsize=25)
-        remain_coords = self.coords[inds_rem] - self.group_position
-        remain_coords = recenter(remain_coords, boxsize=25)
+        self.group_coords = recenter(group_coords, boxsize=25)
+        
+        if self.subhalo_index is not None:
+            offset_sub_low = 0
+            for s in range(self.subhalo_rank):
+                offset_sub_low += self.subhalo['Len'][self.group_first_subhalo + s]
+            offset_sub_high = offset_sub_low + self.subhalo['Len'][
+                self.group_first_subhalo + self.subhalo_rank]
+            inds_sub = np.arange(ind + offset_sub_low, ind + offset_sub_high)
+            # IDs_sub = self.ids[inds_sub]
+            subhalo_coords = self.coords[inds_sub] - self.subhalo_position
+            self.subhalo_coords = recenter(subhalo_coords, boxsize=25)
+
+        # inds_rem = np.arange(ind + offset_sub, ind + offset_grp)
+        # remain_coords = self.coords[inds_rem] - self.group_position
+        # self.remain_coords = recenter(remain_coords, boxsize=25)
         
         return group_coords
     
     
-    def get_merger_tree(self):
+    def get_merger_tree(self, descend=False):
         
         if self.verbose:
             print("LOADING {0}...".format(self.path + 'trees.hdf5'))
@@ -315,8 +318,10 @@ class Subhalo(Box):
         
         tree_data = {}
         tree_data['MainProgenitor'] = tree_file['TreeHalos']['TreeMainProgenitor'][()]
+        tree_data['FirstDescendant'] = tree_file['TreeHalos']['TreeFirstDescendant'][()]
         tree_data['SubhaloMass'] = tree_file['TreeHalos']['SubhaloMass'][()]
         tree_data['SubhaloNr'] = tree_file['TreeHalos']['SubhaloNr'][()]
+        tree_data['GroupNr'] = tree_file['TreeHalos']['GroupNr'][()]
         tree_data['SnapNum'] = tree_file['TreeHalos']['SnapNum'][()]
         
         mass = []
@@ -324,18 +329,33 @@ class Subhalo(Box):
                            (tree_data['SubhaloNr'] == self.subhalo_index)).flatten())[0]
         inds = []
         nrs = []
+        grpnrs = []
         snap_nums = []
-        while tree_data['MainProgenitor'][n] > -1:
+        if descend:
+            key = 'FirstDescendant'
+        else:
+            key = 'MainProgenitor'
+        while tree_data[key][n] > -1:
             inds.append(n)
             mass.append(tree_data['SubhaloMass'][n])
             nrs.append(tree_data['SubhaloNr'][n])
+            grpnrs.append(tree_data['GroupNr'][n])
             snap_nums.append(tree_data['SnapNum'][n])
-            n = tree_data['MainProgenitor'][n]
-        self.merger_tree = np.flip(np.array(inds))
-        self.tree_subhalo_indices = np.flip(np.array(nrs))
-        self.tree_masses = np.flip(np.array(mass))
-        self.tree_snapshot_numbers = np.flip(np.array(snap_nums))
-        self.tree_redshifts = tree_file['TreeTimes/Redshift'][()]
+            n = tree_data[key][n]
+        if descend:
+            self.merger_tree = np.array(inds)
+            self.tree_subhalo_indices = np.array(nrs)
+            self.tree_group_indices = np.array(grpnrs)
+            self.tree_masses = np.array(mass)
+            self.tree_snapshot_numbers = np.array(snap_nums)
+        else:
+            self.merger_tree = np.flip(np.array(inds))
+            self.tree_subhalo_indices = np.flip(np.array(nrs))
+            self.tree_group_indices = np.flip(np.array(grpnrs))
+            self.tree_masses = np.flip(np.array(mass))
+            self.tree_snapshot_numbers = np.flip(np.array(snap_nums))
+        self.tree_redshifts = tree_file['TreeTimes/Redshift'][()][-len(self.merger_tree):]
+        self.tree_times = tree_file['TreeTimes/Time'][()][-len(self.merger_tree):]
 
 
     def histogram_halo(self, nbins, cutoff_radii):
@@ -430,7 +450,8 @@ class Subhalo(Box):
         return disp, disprad
 
 
-    def calc_dispersion_profile(self, nbins, cutoff_radii, fit_model=False, model=None):
+    def calc_dispersion_profile(self, nbins, cutoff_radii, fit_model=False, model=None,
+                                concentration=None):
         
         if not hasattr(self, 'logrhist'):
             self.histogram_halo(nbins, cutoff_radii)
@@ -463,9 +484,16 @@ class Subhalo(Box):
             rad = self.rcenter[:-1]
             inner = np.argmin((np.abs(rad - self.convergence_radius)))
             outer = np.argmin((np.abs(rad - 0.8*self.R_scale)))
-            v, c = self.get_v_c(params=None, v=200)
-            self.radial_dispersion_profile_model = model[0](rad/self.R_scale, c,
-                              np.mean(self.beta_profile[inner:outer]))
+            if not hasattr(self, 'density_fit_params') and concentration is None:
+                raise Exception(
+                    'No concentration provided for velocity dispersion model. \
+Either specify with the concentration argument or fit density profile first.')
+            elif concentration is None:
+                v, concentration = self.get_v_c(params=None, v=200)
+            b = np.mean(self.beta_profile[inner:outer])
+            # print('\nbeta = {}\n'.format(b))
+            self.radial_dispersion_profile_model = model[0](rad/self.R_scale, concentration,
+                              b)
         
         return
 
@@ -552,11 +580,11 @@ class Subhalo(Box):
         
     
     def plot_dispersion_profile(self, nbins, cutoff_radii, plot_model=False, model=None,
-                                style=(('C0', 'C1'), ('-', '-')), xlim=None, ylim=None,
-                                title=None, save=False, savefile=None):
+                                concentration=None, style=(('C0', 'C1'), ('-', '-')),
+                                xlim=None, ylim=None, title=None, save=False, savefile=None):
         if not hasattr(self, 'radial_dispersion_profile'):
-            self.calc_dispersion_profile(nbins, cutoff_radii,
-                                         fit_model=plot_model, model=model)
+            self.calc_dispersion_profile(nbins, cutoff_radii, fit_model=plot_model,
+                                         concentration=concentration, model=model)
         
         f_disp = plt.subplots(2, 1, sharex=True, figsize=(10, 10))
         rad = self.rcenter[:-1] / self.R_scale
