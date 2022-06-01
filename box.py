@@ -1,11 +1,11 @@
 import glob
 import numpy as np
 import h5py
-# import time
-from utils import recenter, approx_concentration, calc_delta_c, pretty_print
+import time
+from utils import recenter, approx_concentration, pretty_print
 import matplotlib.pyplot as plt
 from sphviewer.tools import QuickView
-from lmfit import Minimizer, Parameters
+from lmfit import Minimizer
 
 class Box():
 
@@ -25,7 +25,7 @@ class Box():
     def read_snap(self, filename, verbose):
         
         if verbose:
-            # start = time.time()
+            start = time.time()
             print("LOADING {0}...".format(filename))
         
         snap = h5py.File(filename,'r')
@@ -53,11 +53,13 @@ class Box():
         self.mean_interparticle_spacing = self.box_size / self.nsample
         self.convergence_radius = 0.77 * (3 * self.OmegaDM / (800 * np.pi))**(1/3) \
             * self.mean_interparticle_spacing / (1 + self.redshift)
+            
+        self.gravitational_constant = 43.02
         
         snap.close()
         if verbose:
-            # end = time.time()
-            # print("...LOADED in {0} seconds\n".format(round(end-start, 2)))
+            end = time.time()
+            print("...LOADED in {0} seconds\n".format(round(end-start, 2)))
             self.box_info()
         
         return params
@@ -78,8 +80,8 @@ class Box():
         group['FirstSub'] = subh['Group']['GroupFirstSub'][()]
         
         np.seterr(divide='ignore', invalid='ignore')
-        group['V200'] = np.sqrt(43.02 * group['M200'] / group['R200'])
-        group['V500'] = np.sqrt(43.02 * group['M500'] / group['R500'])
+        group['V200'] = np.sqrt(self.gravitational_constant * group['M200'] / group['R200'])
+        group['V500'] = np.sqrt(self.gravitational_constant * group['M500'] / group['R500'])
         group['A200'] = group['V200']**2 / group['R200']
         group['A500'] = group['V500']**2 / group['R500']
         group['Vol200'] = 4 * np.pi * group['R200']**3 / 3
@@ -137,7 +139,6 @@ class Box():
         else:
             f_mass[0].show()
         
-        
     
     def plot_box(self, title=None, save=False, savefile=None):
         width = self.box_size/2
@@ -183,6 +184,7 @@ class Box():
         
         return
 
+
 class Subhalo(Box):
 
     def __init__(self, path, snapshot, group_index=None, subhalo_index=None,
@@ -211,6 +213,11 @@ class Subhalo(Box):
         initializes group parameters
 
         """
+
+        self.group_first_subhalo = self.group['FirstSub'][self.group_index]
+        if self.subhalo_index is None:
+            self.subhalo_index = self.group_first_subhalo
+            self.get_subhalo_params(verbose=False)
         
         self.R_200 = self.group['R200'][self.group_index]
         self.R_500 = self.group['R500'][self.group_index]
@@ -220,8 +227,6 @@ class Subhalo(Box):
         self.group_position = self.group['Pos'][self.group_index]
         self.group_velocity = self.group['Vel'][self.group_index]
         self.group_len = self.group['Len'][self.group_index]
-        self.group_first_subhalo = self.group['FirstSub'][self.group_index]
-        self.subhalo_rank = None
         
         coords_rel = self.coords - self.group_position
         self.centered_coords = recenter(coords_rel, self.box_size)
@@ -251,15 +256,17 @@ class Subhalo(Box):
 
         """
         
+        self.group_index = self.subhalo['SubhaloGroupNr'][self.subhalo_index]
+        if self.group_index is None:
+            self.get_group_params(verbose=False)
+        
         self.halfmass_radius = self.subhalo['HalfmassRad'][self.subhalo_index]
         self.subhalo_mass = self.subhalo['Mass'][self.subhalo_index]
         self.subhalo_position = self.subhalo['Pos'][self.subhalo_index]
         self.subhalo_center_of_mass = self.subhalo['CM'][self.subhalo_index]
         self.subhalo_velocity = self.subhalo['Vel'][self.subhalo_index]
         self.subhalo_len = self.subhalo['Len'][self.subhalo_index]
-        self.group_id_most_bound = self.subhalo['IDMostbound'][self.subhalo_index]
-        self.group_index = self.subhalo['SubhaloGroupNr'][self.subhalo_index]
-        self.get_group_params(False)
+        self.subhalo_index_most_bound = np.argwhere((self.ids == self.subhalo['IDMostbound'][self.subhalo_index])).flatten()[0]
         self.subhalo_rank = self.subhalo['SubhaloRankInGr'][self.subhalo_index]
         
         coords_rel = self.coords - self.subhalo_position
@@ -268,7 +275,8 @@ class Subhalo(Box):
         
         self.R_scale = self.halfmass_radius
         self.M_scale = self.subhalo_mass / 2
-        self.V_scale = np.sqrt(43.02 * self.M_scale / self.R_scale)
+        self.V_scale = np.sqrt(self.gravitational_constant * self.M_scale /\
+                               self.R_scale)
         
         self.R_subscript = '1 / 2'
         
@@ -298,6 +306,7 @@ class Subhalo(Box):
             offset_sub_high = offset_sub_low + self.subhalo['Len'][
                 self.group_first_subhalo + self.subhalo_rank]
             inds_sub = np.arange(ind + offset_sub_low, ind + offset_sub_high)
+            self.inds_sub = inds_sub
             # IDs_sub = self.ids[inds_sub]
             subhalo_coords = self.coords[inds_sub] - self.subhalo_position
             self.subhalo_coords = recenter(subhalo_coords, boxsize=25)
@@ -323,10 +332,13 @@ class Subhalo(Box):
         tree_data['SubhaloNr'] = tree_file['TreeHalos']['SubhaloNr'][()]
         tree_data['GroupNr'] = tree_file['TreeHalos']['GroupNr'][()]
         tree_data['SnapNum'] = tree_file['TreeHalos']['SnapNum'][()]
+        tree_data['ID'] = tree_file['TreeHalos']['TreeID'][()]
+        tree_data['StartOffset'] = tree_file['TreeTable']['StartOffset'][()]
         
         mass = []
         n = (np.argwhere((tree_data['SnapNum'] == self.snapshot) & \
-                           (tree_data['SubhaloNr'] == self.subhalo_index)).flatten())[0]
+                           (tree_data['SubhaloNr'] == self.subhalo_index) & \
+                               (tree_data['GroupNr'] == self.group_index)).flatten())[0]
         inds = []
         nrs = []
         grpnrs = []
@@ -341,7 +353,7 @@ class Subhalo(Box):
             nrs.append(tree_data['SubhaloNr'][n])
             grpnrs.append(tree_data['GroupNr'][n])
             snap_nums.append(tree_data['SnapNum'][n])
-            n = tree_data[key][n]
+            n = tree_data['StartOffset'][tree_data['ID'][n]] + tree_data[key][n]
         if descend:
             self.merger_tree = np.array(inds)
             self.tree_subhalo_indices = np.array(nrs)
@@ -363,6 +375,7 @@ class Subhalo(Box):
         r = np.sqrt(self.centered_coords[:,0]**2 + self.centered_coords[:,1]**2 + \
                     self.centered_coords[:,2]**2)
         inds = np.argwhere((r < cutoff_radii[1]) & (r > 0)) # r > 0 so log() doesn't diverge
+        self.particle_indices = inds.flatten()
         self.r_all = r
         self.r = r[inds].flatten()
         
@@ -386,15 +399,13 @@ class Subhalo(Box):
         
     def calc_density_profile(self, nbins, cutoff_radii, fit_model=False, model=None):
         
-        if not hasattr(self, 'logrhist'):
-            self.histogram_halo(nbins, cutoff_radii)
+        self.histogram_halo(nbins, cutoff_radii)
         
         if not hasattr(self, 'density_profile'):
             self.density_profile = self.particle_mass * self.logrhist / \
                 ((4 * np.pi / 3) * (self.redge[1:]**3 - self.redge[:-1]**3))
         
         if fit_model:
-            # if not hasattr(self, 'density_fit_params'):
             rad = self.rcenter[:-1]
             inner = np.argmin((np.abs(rad - self.convergence_radius)))
             outer = np.argmin((np.abs(rad - 0.8*self.R_scale)))
@@ -402,24 +413,23 @@ class Subhalo(Box):
                 raise Exception('Subhalo radius too close to convergence radius! Cannot perform reliable fit.')
             fit_radius = rad[inner:outer]
             fit_density = self.density_profile[inner:outer]
-            # print('inner, outer', inner, outer)
             self.density_fit_params = self.fit_model(model[0], model[1],
                                         fit_density/self.critical_density, {'r': fit_radius})
             self.density_profile_model = self.critical_density * \
                 model[0](self.density_fit_params, rad)
                 
         return
-    
+
+
     def calc_mass_profile(self, nbins, cutoff_radii, fit_model=False, model=None):
 
-        if not hasattr(self, 'logrhist'):
-            self.histogram_halo(nbins, cutoff_radii)
+        self.histogram_halo(nbins, cutoff_radii)
         
         self.mass_profile = self.particle_mass * np.cumsum(self.logrhist)
         
         if fit_model:
-            # if not hasattr(self, 'density_fit_params'):
             rad = self.redge[1:]
+            # if not hasattr(self, 'density_fit_params'):
             inner = np.argmin((np.abs(rad - self.convergence_radius)))
             outer = np.argmin((np.abs(rad - 0.8*self.R_scale)))
             if outer - inner < 3:
@@ -451,14 +461,13 @@ class Subhalo(Box):
 
 
     def calc_dispersion_profile(self, nbins, cutoff_radii, fit_model=False, model=None,
-                                concentration=None):
+                                concentration=None, beta=None):
         
-        if not hasattr(self, 'logrhist'):
-            self.histogram_halo(nbins, cutoff_radii)
+        self.histogram_halo(nbins, cutoff_radii)
         
         disprad = []
         disptot = []
-        beta = []
+        beta_profile = []
         for b in range(nbins):
             inds_i = np.argwhere((self.r > self.redge[b]) & (self.r < self.redge[b+1]))
             inds_i = inds_i[:,0]
@@ -469,16 +478,16 @@ class Subhalo(Box):
             disp_i, disprad_i = self.calc_vel_disp(vi, xi)
             beta_i = 0.5 * (3 - (disp_i**2 / disprad_i**2))
             
-            beta.append(beta_i)
+            beta_profile.append(beta_i)
             disprad.append(disprad_i)
             disptot.append(disp_i)
         disprad = np.array(disprad)
         disptot = np.array(disptot)
-        beta = np.array(beta)
+        beta_profile = np.array(beta_profile)
         
         self.radial_dispersion_profile = disprad
         self.total_dispersion_profile = disptot
-        self.beta_profile = beta
+        self.beta_profile = beta_profile
         
         if fit_model:
             rad = self.rcenter[:-1]
@@ -489,11 +498,12 @@ class Subhalo(Box):
                     'No concentration provided for velocity dispersion model. \
 Either specify with the concentration argument or fit density profile first.')
             elif concentration is None:
-                v, concentration = self.get_v_c(params=None, v=200)
-            b = np.mean(self.beta_profile[inner:outer])
+                concentration = self.get_concentration(v=200)
+            if beta is None:
+                beta = np.mean(self.beta_profile[inner:outer])
             # print('\nbeta = {}\n'.format(b))
             self.radial_dispersion_profile_model = model[0](rad/self.R_scale, concentration,
-                              b)
+                              beta)
         
         return
 
@@ -543,7 +553,8 @@ Either specify with the concentration argument or fit density profile first.')
         if save:
             f_dens[0].savefig(savefile, dpi=300)
             plt.close(f_dens[0])
-            
+
+
     def plot_mass_profile(self, nbins, cutoff_radii, plot_model=False, model=None,
                              style=('C0', '-'), xlim=None, ylim=None,
                              title=None, save=False, savefile=None):
@@ -643,16 +654,10 @@ Either specify with the concentration argument or fit density profile first.')
         if save:
             f_subh[0].savefig(savefile, dpi=500)
             plt.close(f_subh[0])
-    
-    def get_v_c(self, params=None, v=None):
-        args = {'particle_radii': self.r, 'particle_mass': self.particle_mass,
-                'critical_density': self.critical_density, 'Rs': self.density_fit_params['scale_radius'].value,
-                'R_200': self.R_scale}
-        if v is None:
-            fit_params = self.fit_model(calc_delta_c, params, self.density_fit_params['central_density'].value,
-                           args, log=False)
-            v = fit_params['virial_overdensity'].value
-        return v, approx_concentration(self.density_fit_params['central_density'].value, v)
+
+
+    def get_concentration(self, v=None):
+        return approx_concentration(self.density_fit_params['central_density'].value, v)
 
 
     def fit_model(self, model, params, quantity, args, log=True):
