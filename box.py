@@ -10,20 +10,55 @@ from lmfit import Minimizer
 
 class Box():
 
-    def __init__(self, path, snapshot, verbose=True):
+    def __init__(self, path, snapshot, snapshot_prefix='snapshot',
+                 verbose=True):
+        """
+        Box object containing parameters and methods for the simulation box as
+        a whole.
+
+        Parameters
+        ----------
+        path : str
+            Directory containing the simulation output.
+        snapshot : int
+            Number of the desired snapshot.
+        snapshot_prefix : str, optional
+            The prefix of the snapshot files. The default is 'snapshot'.
+        verbose : bool, optional
+            Print all the things. The default is True.
+
+        """
 
         self.path = path
         self.snapshot = snapshot
 
         file = path + '{}_{:03d}.hdf5'
-        if np.sort(glob.glob(path + 'snapshot_*')).size != 0:
-            self.snap = self.read_snap(file.format('snapshot', snapshot),
+        if np.sort(glob.glob(file.format(snapshot_prefix,
+                                         snapshot))).size != 0:
+            self.snap = self.read_snap(file.format(snapshot_prefix, snapshot),
                                        verbose)
-        if np.sort(glob.glob(path + 'fof_subhalo_tab_*')).size != 0:
+        if np.sort(glob.glob(file.format('fof_subhalo_tab',
+                                         snapshot))).size != 0:
             self.group, self.subhalo = self.read_groups(file.format(
                 'fof_subhalo_tab', snapshot), verbose)
 
     def read_snap(self, filename, verbose):
+        """
+        Read in snapshot contents.
+
+        Parameters
+        ----------
+        filename : str
+            Snapshot file.
+        verbose : bool
+            Print all the things.
+
+        Returns
+        -------
+        params : dict
+            Snapshot data and parameters.
+
+        """
 
         if verbose:
             start = time.time()
@@ -67,6 +102,24 @@ class Box():
         return params
 
     def read_groups(self, filename, verbose):
+        """
+        Read in group and subhalo data.
+
+        Parameters
+        ----------
+        filename : str
+            Group file.
+        verbose : bool
+            Print all the things.
+
+        Returns
+        -------
+        group : dict
+            Group data and parameters.
+        subhalo : dict
+            Subhalo data and parameters.
+
+        """
 
         subh = h5py.File(filename, 'r')
 
@@ -115,6 +168,15 @@ class Box():
         return group, subhalo
 
     def calc_mass_function(self, nbins=20):
+        """
+        Compute the mass function of the box in Mpc^(-3).
+
+        Parameters
+        ----------
+        nbins : int, optional
+            Number of mass bins. The default is 20.
+
+        """
 
         mass_func_vol, self.mass_bins = np.histogram(np.log10(
             self.group['Mass']), bins=nbins)
@@ -122,6 +184,21 @@ class Box():
 
     def plot_mass_function(self, nbins=20, title=None, save=False,
                            savefile=None):
+        """
+        Plot the mass function of the box.
+
+        Parameters
+        ----------
+        nbins : int, optional
+            Number of mass bins. The default is 20.
+        title : str, optional
+            Title of the plot. The default is None.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
 
         if not hasattr(self, 'mass_function'):
             self.calc_mass_function(nbins=nbins)
@@ -143,6 +220,20 @@ class Box():
             f_mass[0].show()
 
     def plot_box(self, title=None, save=False, savefile=None):
+        """
+        2D plot of the particle distribution.
+
+        Parameters
+        ----------
+        title : str, optional
+            Title of the plot. The default is None.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
+
         width = self.box_size/2
         coords = self.coords - np.array([width]*3)
         qv_parallel = QuickView(coords, r='infinity', plot=False,
@@ -167,6 +258,10 @@ class Box():
             f_box[0].show()
 
     def box_info(self):
+        """
+        Print some of the simulation parameters.
+
+        """
 
         pretty_print([round(self.redshift, 3),
                       self.box_size * self.length_norm,
@@ -187,11 +282,35 @@ class Box():
         return
 
 
-class Subhalo():
+class Halo():
 
-    def __init__(self, box=None, path=None, snapshot=None, group_index=None,
-                 subhalo_index=None, isolated=False, verbose=True):
-        # Box.__init__(self, path, snapshot, verbose=verbose)
+    def __init__(self, box=None, path=None, snapshot=None,
+                 snapshot_prefix='snapshot', group_index=None,
+                 subhalo_index=None, verbose=True):
+        """
+        Halo object containing parameters and methods pertaining to individual
+        groups or subhalos.
+
+        Parameters
+        ----------
+        box : Box object, optional
+            Box object to load. The default is None.
+        path : str
+            Directory containing the simulation output.
+        snapshot : int
+            Number of the desired snapshot.
+        snapshot_prefix : str, optional
+            The prefix of the snapshot files. The default is 'snapshot'.
+        group_index : int, optional
+            Index of the desired group. The default is None.
+        subhalo_index : int, optional
+            Index of the desired subhalo. If group_index is specified, only the
+            subhalos within that group are considered. The default is None.
+        verbose : bool, optional
+            Print all the things. The default is True.
+
+        """
+
         if box is None:
             self.path = path
             self.snapshot = snapshot
@@ -216,7 +335,12 @@ class Subhalo():
 
     def get_group_params(self, verbose):
         """
-        initializes group parameters
+        Retrieve data for specified group.
+
+        Parameters
+        ----------
+        verbose : bool
+            Print all the things.
 
         """
 
@@ -256,7 +380,13 @@ class Subhalo():
 
     def get_subhalo_params(self, verbose):
         """
-        initializes group parameters
+        Retrieve data for specified subhalo. If subhalo index is not specified,
+        this is the parent (rank 0) subhalo of the group.
+
+        Parameters
+        ----------
+        verbose : bool
+            Print all the things.
 
         """
 
@@ -328,6 +458,16 @@ class Subhalo():
         return group_coords
 
     def get_merger_tree(self, descend=False):
+        """
+        Retrieve the merger tree of the subhalo.
+
+        Parameters
+        ----------
+        descend : bool, optional
+            Retrieve the descendants rather than the progenitors. The default
+            is False.
+
+        """
 
         if self.verbose:
             print("LOADING {0}...".format(self.path + 'trees.hdf5'))
@@ -385,6 +525,17 @@ class Subhalo():
             -len(self.merger_tree):]
 
     def histogram_halo(self, nbins, cutoff_radii):
+        """
+        Bin the particles of the group or subhalo by log radius.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+
+        """
 
         r = np.sqrt(self.centered_coords[:, 0]**2 +
                     self.centered_coords[:, 1]**2 +
@@ -412,8 +563,20 @@ class Subhalo():
 
         return
 
-    def calc_density_profile(self, nbins, cutoff_radii, fit_model=False,
-                             model=None):
+    def calc_density_profile(self, nbins, cutoff_radii, model=None):
+        """
+        Compute the density profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+
+        """
 
         self.histogram_halo(nbins, cutoff_radii)
 
@@ -421,7 +584,7 @@ class Subhalo():
             self.density_profile = self.box.particle_mass * self.logrhist / \
                 ((4 * np.pi / 3) * (self.redge[1:]**3 - self.redge[:-1]**3))
 
-        if fit_model:
+        if model is not None:
             rad = self.rcenter[:-1]
             inner = np.argmin((np.abs(rad - self.box.convergence_radius)))
             outer = np.argmin((np.abs(rad - 0.8*self.R_scale)))
@@ -438,14 +601,26 @@ class Subhalo():
 
         return
 
-    def calc_mass_profile(self, nbins, cutoff_radii, fit_model=False,
-                          model=None):
+    def calc_mass_profile(self, nbins, cutoff_radii, model=None):
+        """
+        Compute the mass profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+
+        """
 
         self.histogram_halo(nbins, cutoff_radii)
 
         self.mass_profile = self.box.particle_mass * np.cumsum(self.logrhist)
 
-        if fit_model:
+        if model is not None:
             rad = self.redge[1:]
             # if not hasattr(self, 'density_fit_params'):
             inner = np.argmin((np.abs(rad - self.box.convergence_radius)))
@@ -464,6 +639,25 @@ class Subhalo():
         return
 
     def calc_vel_disp(self, v, x):
+        """
+        Calculate the velocity dispersion of a group of particles.
+
+        Parameters
+        ----------
+        v : array of shape (nparticles, 3)
+            Velocities of the particles relative to the bulk motion of the
+            halo.
+        x : array of shape (nparticles, 3)
+            Positions of the particles relative to the halo center.
+
+        Returns
+        -------
+        disp : float
+            The total velocity dipsersion.
+        disprad : float
+            The velocity dispersion in the radial direction.
+
+        """
         sqmag = np.sum(x**2, axis=1)
         rhat = x / np.sqrt(sqmag.reshape(len(sqmag), 1))
         vrad = np.sum(v*rhat, axis=1)
@@ -478,8 +672,30 @@ class Subhalo():
 
         return disp, disprad
 
-    def calc_dispersion_profile(self, nbins, cutoff_radii, fit_model=False,
-                                model=None, concentration=None, beta=None):
+    def calc_dispersion_profile(self, nbins, cutoff_radii, model=None,
+                                concentration=None, beta=None):
+        """
+        Compute the radial and total velocity dispersion profile and the beta
+        profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+        concentration : float, optional
+            Value of the concentration to use in the theoretical profile
+            calculation. If unspecified, uses the value from a fit to the
+            density profile. The default is None.
+        beta : float, optional
+            Value of beta to use in the theoretical profile calculation. If
+            unspecified, uses the mean of the beta profile. The default is
+            None.
+
+        """
 
         self.histogram_halo(nbins, cutoff_radii)
 
@@ -508,7 +724,7 @@ class Subhalo():
         self.total_dispersion_profile = disptot
         self.beta_profile = beta_profile
 
-        if fit_model:
+        if model is not None:
             rad = self.rcenter[:-1]
             inner = np.argmin((np.abs(rad - self.box.convergence_radius)))
             outer = np.argmin((np.abs(rad - 0.8*self.R_scale)))
@@ -529,16 +745,50 @@ class Subhalo():
         return
 
     def calc_angular_momentum(self, v, x, specific=False):
-        # return np.sum(np.cross(x, v), axis=0)[2]# / np.shape(x)[0]
+        """
+        Calculate the angular momentum of a group of particles.
+
+        Parameters
+        ----------
+        v : array of shape (nparticles, 3)
+            Velocities of the particles relative to the bulk motion of the
+            halo.
+        x : array of shape (nparticles, 3)
+            Positions of the particles relative to the halo center.
+        specific : bool, optional
+            Calculate the specific angular momentum. The default is False.
+
+        Returns
+        -------
+        float
+            The angular momentum.
+
+        """
         if specific:
             return np.sum(np.cross(x, v), axis=0) / len(x)
         else:
             return self.box.particle_mass * np.sum(np.cross(x, v), axis=0)
 
-    def calc_angular_momentum_profile(self, nbins, cutoff_radii,
-                                      fit_model=False, model=None, proj=None,
-                                      specific=False):
+    def calc_angular_momentum_profile(self, nbins, cutoff_radii, model=None,
+                                      proj=None, specific=False):
+        """
+        Compute the angular momentum profile of the group or subhalo.
 
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+        proj : array of shape (3,), optional
+            Unit vector along which to project the angular momentum. The
+            default is None.
+        specific : bool, optional
+            Calculate the specific angular momentum. The default is False.
+
+        """
         self.histogram_halo(nbins, cutoff_radii)
 
         angmom_profile = []
@@ -564,9 +814,37 @@ class Subhalo():
     def plot_density_profile(self, nbins, cutoff_radii, plot_model=False,
                              model=None, style=('C0', '-'), xlim=None,
                              ylim=None, title=None, save=False, savefile=None):
+        """
+        Plot the density profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        plot_model : bool, optional
+            Plot the model fit. The default is False.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+        style : tuple of str, optional
+            Color and linestyle of the profile. The default is ('C0', '-').
+        xlim : tuple of float, optional
+            The x-axis limits of the plot. If None, uses cutoff_radii. The
+            default is None.
+        ylim : tuple of float, optional
+            The y-axis limits of the plot. The default is None.
+        title : str, optional
+            Title of the plot. The default is None.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
 
         if not hasattr(self, 'density_profile'):
-            self.calc_density_profile(nbins, cutoff_radii, plot_model, model)
+            self.calc_density_profile(nbins, cutoff_radii, model)
 
         f_dens = plt.subplots(2, 1, sharex=True, figsize=(10, 10))
         rad = self.rcenter[:-1] / self.R_scale
@@ -615,9 +893,37 @@ class Subhalo():
     def plot_mass_profile(self, nbins, cutoff_radii, plot_model=False,
                           model=None, style=('C0', '-'), xlim=None, ylim=None,
                           title=None, save=False, savefile=None):
+        """
+        Plot the mass profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        plot_model : bool, optional
+            Plot the model fit. The default is False.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+        style : tuple of str, optional
+            Color and linestyle of the profile. The default is ('C0', '-').
+        xlim : tuple of float, optional
+            The x-axis limits of the plot. If None, uses cutoff_radii. The
+            default is None.
+        ylim : tuple of float, optional
+            The y-axis limits of the plot. The default is None.
+        title : str, optional
+            Title of the plot. The default is None.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
 
         if not hasattr(self, 'mass_profile'):
-            self.calc_mass_profile(nbins, cutoff_radii, plot_model, model)
+            self.calc_mass_profile(nbins, cutoff_radii, model)
 
         f_mass = plt.subplots(figsize=(8, 5))
         rad = self.redge[1:] / self.R_scale
@@ -649,13 +955,46 @@ class Subhalo():
 
     def plot_dispersion_profile(self, nbins, cutoff_radii, plot_model=False,
                                 model=None, concentration=None,
-                                style=(('C0', 'C1'), ('-', '-')),
-                                xlim=None, ylim=None, title=None, save=False,
+                                style=(('C0', 'C1'), ('-', '-')), xlim=None,
+                                ylim=None, title=None, save=False,
                                 savefile=None):
+        """
+        Plot the radial and total velocity dipsersion profile and the beta
+        profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        plot_model : bool, optional
+            Plot the model fit. The default is False.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+        concentration : float, optional
+            Value of the concentration to use in the theoretical profile
+            calculation. If unspecified, uses the value from a fit to the
+            density profile. The default is None.
+        style : tuple of str, optional
+            Color and linestyle of the profile. The default is
+            (('C0', 'C1'), ('-', '-')).
+        xlim : tuple of float, optional
+            The x-axis limits of the plot. If None, uses cutoff_radii. The
+            default is None.
+        ylim : tuple of float, optional
+            The y-axis limits of the plot. The default is None.
+        title : str, optional
+            Title of the plot. The default is None.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
 
         if not hasattr(self, 'radial_dispersion_profile'):
             self.calc_dispersion_profile(nbins, cutoff_radii,
-                                         fit_model=plot_model,
                                          concentration=concentration,
                                          model=model)
 
@@ -698,9 +1037,29 @@ class Subhalo():
             f_disp[0].savefig(savefile, dpi=300)
             plt.close(f_disp[0])
 
-    def plot_angular_momentum_profile(self, nbins, cutoff_radii, save=False,
-                                      savefile=None, proj=None,
-                                      specific=False, log=False):
+    def plot_angular_momentum_profile(self, nbins, cutoff_radii, proj=None,
+                                      specific=False, save=False,
+                                      savefile=None):
+        """
+        Compute the angular momentum profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        proj : array of shape (3,), optional
+            Unit vector along which to project the angular momentum. The
+            default is None.
+        specific : bool, optional
+            Calculate the specific angular momentum. The default is False.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
 
         # if not hasattr(self, 'radial_dispersion_profile'):
         self.calc_angular_momentum_profile(nbins, cutoff_radii, proj=proj,
@@ -714,9 +1073,6 @@ class Subhalo():
         f_angmom[1].axvline(self.box.convergence_radius/self.R_scale,
                             color='r', linestyle='--',
                             label='convergence radius')
-        if log:
-            f_angmom[1].set_xscale('log')
-            f_angmom[1].set_yscale('log')
         f_angmom[1].set_xlabel(r'$r/R_{{{}}}$'.format(self.R_subscript))
         f_angmom[1].set_ylabel(r'$|j|/(V_{{{0}}}R_{{{1}}})$'
                                .format(self.R_subscript, self.R_subscript))
@@ -728,6 +1084,22 @@ class Subhalo():
 
     def plot_subhalo(self, extent=[-2, 2, -2, 2], title=None, save=False,
                      savefile=None):
+        """
+        2D plot of the subhalo particle distribution.
+
+        Parameters
+        ----------
+        extent : array of shape (4,), optional
+            x and y limits of the plot in units of the virial radius. The
+            default is [-2, 2, -2, 2].
+        title : str, optional
+            Title of the plot. The default is None.
+        save : bool, optional
+            Save the plot. The default is False.
+        savefile : str, optional
+            Filename of the saved plot. The default is None.
+
+        """
 
         extent = self.R_scale * np.array(extent)
         qv_parallel = QuickView(self.centered_coords, r='infinity', plot=False,
@@ -762,12 +1134,48 @@ class Subhalo():
             f_subh[0].savefig(savefile, dpi=500)
             plt.close(f_subh[0])
 
-    def get_concentration(self, v=None):
+    def get_concentration(self, v=200):
+        """
+        Calculate the concentration from the density fit parameters.
+
+        Parameters
+        ----------
+        v : float, optional
+            Virial overdensity parameter. The default is 200.
+
+        Returns
+        -------
+        float
+            The concentration.
+
+        """
 
         return approx_concentration(
             self.density_fit_params['central_density'].value, v)
 
     def fit_model(self, model, params, quantity, args, log=True):
+        """
+        Fit a specified model to some data.
+
+        Parameters
+        ----------
+        model : function
+            The model.
+        params : dict
+            The model parameters.
+        quantity : 1D array
+            The data to fit the model to.
+        args : dict
+            Arguments of the model function.
+        log : bool, optional
+            Fit in log space. The default is True.
+
+        Returns
+        -------
+        dict
+            The fit parameter values.
+
+        """
 
         def residual(p, q, args, log=True):
             if log:
@@ -788,6 +1196,10 @@ class Subhalo():
         return fit_params
 
     def group_info(self):
+        """
+        Print some of the group parameters.
+
+        """
 
         cm_per_Mpc = 3.085678e+24
         g_per_1e10Msun = 1.989e43
