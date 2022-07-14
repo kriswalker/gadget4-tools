@@ -219,7 +219,7 @@ class Box():
         else:
             f_mass[0].show()
 
-    def plot_box(self, title=None, save=False, savefile=None):
+    def plot_box(self, proj='xy', title=None, save=False, savefile=None):
         """
         2D plot of the particle distribution.
 
@@ -236,6 +236,10 @@ class Box():
 
         width = self.box_size/2
         coords = self.coords - np.array([width]*3)
+        if proj == 'xz':
+            coords[:, [0, 1, 2]] = coords[:, [0, 2, 1]]
+        elif proj == 'yz':
+            coords[:, [0, 1, 2]] = coords[:, [1, 2, 0]]
         qv_parallel = QuickView(coords, r='infinity', plot=False,
                                 x=0, y=0, z=0, extent=[-width, width,
                                                        -width, width])
@@ -243,8 +247,8 @@ class Box():
         f_box[1].imshow(qv_parallel.get_image(),
                         extent=qv_parallel.get_extent(),
                         cmap='inferno', origin='lower')
-        f_box[1].set_xlabel(r'x ($h^{-1}$ Mpc)')
-        f_box[1].set_ylabel(r'y ($h^{-1}$ Mpc)')
+        f_box[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[0], '-1'))
+        f_box[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[1], '-1'))
         metadata = [('No. of particles = {0}', '{}^3'.format(self.nsample)),
                     ('Box size = {0} Mpc', self.box_size * self.length_norm),
                     ('z = {0}', round(self.redshift, 3))]
@@ -322,13 +326,12 @@ class Halo():
         if subhalo_index is not None:
             self.subhalo_index = subhalo_index
             self.get_subhalo_params(verbose)
-            # self.subhalo_coords = self.get_subhalo_particle_positions()
         else:
             self.subhalo_index = None
         if group_index is not None:
             self.group_index = group_index
             self.get_group_params(verbose)
-            self.group_coords = self.get_group_particle_positions()
+        self.get_halo_particle_positions()
         self.verbose = verbose
         if verbose and group_index is not None:
             self.group_info()
@@ -345,9 +348,9 @@ class Halo():
         """
 
         self.group_first_subhalo = self.box.group['FirstSub'][self.group_index]
-        if self.subhalo_index is None:
-            self.subhalo_index = self.group_first_subhalo
-            self.get_subhalo_params(verbose=False)
+        # if self.subhalo_index is None:
+        #     self.subhalo_index = self.group_first_subhalo
+        #     self.get_subhalo_params(verbose=False)
 
         self.R_200 = self.box.group['R200'][self.group_index]
         self.R_500 = self.box.group['R500'][self.group_index]
@@ -392,8 +395,7 @@ class Halo():
 
         self.group_index = self.box.subhalo['SubhaloGroupNr'][
             self.subhalo_index]
-        if self.group_index is None:
-            self.get_group_params(verbose=False)
+        self.get_group_params(verbose=False)
 
         self.halfmass_radius = self.box.subhalo['HalfmassRad'][
             self.subhalo_index]
@@ -422,7 +424,7 @@ class Halo():
 
         return
 
-    def get_group_particle_positions(self):
+    def get_halo_particle_positions(self):
         """
         returns positions of all the particles in the group
 
@@ -431,13 +433,6 @@ class Halo():
         most_bound_particle = self.box.subhalo['IDMostbound'][
             self.group_first_subhalo]
         ind = np.where(self.box.ids == most_bound_particle)[0]
-
-        offset_grp = self.group_len
-        inds_grp = np.arange(ind, ind + offset_grp)
-        # IDs_grp = self.box.ids[inds_grp]
-        group_coords = self.box.coords[inds_grp] - self.group_position
-        self.group_coords = recenter(group_coords, boxsize=25)
-
         if self.subhalo_index is not None:
             offset_sub_low = 0
             for s in range(self.subhalo_rank):
@@ -450,12 +445,21 @@ class Halo():
             # IDs_sub = self.box.ids[inds_sub]
             subhalo_coords = self.box.coords[inds_sub] - self.subhalo_position
             self.subhalo_coords = recenter(subhalo_coords, boxsize=25)
+            self.number_of_particles = len(subhalo_coords)
+
+        elif self.group_index is not None:
+            offset_grp = self.group_len
+            inds_grp = np.arange(ind, ind + offset_grp)
+            # IDs_grp = self.box.ids[inds_grp]
+            group_coords = self.box.coords[inds_grp] - self.group_position
+            self.group_coords = recenter(group_coords, boxsize=25)
+            self.number_of_particles = len(group_coords)
 
         # inds_rem = np.arange(ind + offset_sub, ind + offset_grp)
         # remain_coords = self.box.coords[inds_rem] - self.group_position
         # self.remain_coords = recenter(remain_coords, boxsize=25)
 
-        return group_coords
+        return
 
     def get_merger_tree(self, descend=False):
         """
@@ -1082,8 +1086,8 @@ class Halo():
             f_angmom[0].savefig(savefile, dpi=300)
             plt.close(f_angmom[0])
 
-    def plot_subhalo(self, extent=[-2, 2, -2, 2], title=None, save=False,
-                     savefile=None):
+    def plot_subhalo(self, proj='xy', extent=[-2, 2, -2, 2], title=None,
+                     save=False, savefile=None):
         """
         2D plot of the subhalo particle distribution.
 
@@ -1102,7 +1106,12 @@ class Halo():
         """
 
         extent = self.R_scale * np.array(extent)
-        qv_parallel = QuickView(self.centered_coords, r='infinity', plot=False,
+        coords = np.copy(self.centered_coords)
+        if proj == 'xz':
+            coords[:, [0, 1, 2]] = coords[:, [0, 2, 1]]
+        elif proj == 'yz':
+            coords[:, [0, 1, 2]] = coords[:, [1, 2, 0]]
+        qv_parallel = QuickView(coords, r='infinity', plot=False,
                                 x=0, y=0, z=0, extent=list(extent))
         f_subh = plt.subplots(figsize=(8, 8))
         f_subh[1].imshow(qv_parallel.get_image(),
@@ -1114,8 +1123,8 @@ class Halo():
                        label=r'$R_{{{}}}$'.format(self.R_subscript))
         f_subh[1].plot(x, -np.sqrt(self.R_scale**2 - x**2), color='r',
                        linestyle='--', linewidth=1)
-        f_subh[1].set_xlabel(r'x ($h^{-1}$ Mpc)')
-        f_subh[1].set_ylabel(r'y ($h^{-1}$ Mpc)')
+        f_subh[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[0], '-1'))
+        f_subh[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[1], '-1'))
         metadata = [('Total no. of particles = {0}', '{}^3'
                      .format(self.box.nsample)),
                     ('Box size = {0} Mpc',
