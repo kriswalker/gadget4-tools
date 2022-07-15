@@ -219,12 +219,14 @@ class Box():
         else:
             f_mass[0].show()
 
-    def plot_box(self, proj='xy', title=None, save=False, savefile=None):
+    def plot_box(self, projection='xy', title=None, save=False, savefile=None):
         """
         2D plot of the particle distribution.
 
         Parameters
         ----------
+        projection : str, optional
+            The plane in which to plot. The default is 'xy'.
         title : str, optional
             Title of the plot. The default is None.
         save : bool, optional
@@ -236,10 +238,12 @@ class Box():
 
         width = self.box_size/2
         coords = self.coords - np.array([width]*3)
-        if proj == 'xz':
-            coords[:, [0, 1, 2]] = coords[:, [0, 2, 1]]
-        elif proj == 'yz':
-            coords[:, [0, 1, 2]] = coords[:, [1, 2, 0]]
+        order = []
+        for p in projection:
+            order.append(
+                0 if p == 'x' else 1 if p == 'y' else 2 if p == 'z' else 3)
+        order.append(list(set([0, 1, 2]) - set(order))[0])
+        coords[:, [0, 1, 2]] = coords[:, order]
         qv_parallel = QuickView(coords, r='infinity', plot=False,
                                 x=0, y=0, z=0, extent=[-width, width,
                                                        -width, width])
@@ -247,8 +251,8 @@ class Box():
         f_box[1].imshow(qv_parallel.get_image(),
                         extent=qv_parallel.get_extent(),
                         cmap='inferno', origin='lower')
-        f_box[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[0], '-1'))
-        f_box[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[1], '-1'))
+        f_box[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(projection[0], '-1'))
+        f_box[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(projection[1], '-1'))
         metadata = [('No. of particles = {0}', '{}^3'.format(self.nsample)),
                     ('Box size = {0} Mpc', self.box_size * self.length_norm),
                     ('z = {0}', round(self.redshift, 3))]
@@ -1086,13 +1090,15 @@ class Halo():
             f_angmom[0].savefig(savefile, dpi=300)
             plt.close(f_angmom[0])
 
-    def plot_subhalo(self, proj='xy', extent=[-2, 2, -2, 2], title=None,
+    def plot_subhalo(self, projection='xy', extent=[-2, 2, -2, 2], title=None,
                      save=False, savefile=None):
         """
         2D plot of the subhalo particle distribution.
 
         Parameters
         ----------
+        projection : str, optional
+            The plane in which to plot. The default is 'xy'.
         extent : array of shape (4,), optional
             x and y limits of the plot in units of the virial radius. The
             default is [-2, 2, -2, 2].
@@ -1107,10 +1113,12 @@ class Halo():
 
         extent = self.R_scale * np.array(extent)
         coords = np.copy(self.centered_coords)
-        if proj == 'xz':
-            coords[:, [0, 1, 2]] = coords[:, [0, 2, 1]]
-        elif proj == 'yz':
-            coords[:, [0, 1, 2]] = coords[:, [1, 2, 0]]
+        order = []
+        for p in projection:
+            order.append(
+                0 if p == 'x' else 1 if p == 'y' else 2 if p == 'z' else 3)
+        order.append(list(set([0, 1, 2]) - set(order))[0])
+        coords[:, [0, 1, 2]] = coords[:, order]
         qv_parallel = QuickView(coords, r='infinity', plot=False,
                                 x=0, y=0, z=0, extent=list(extent))
         f_subh = plt.subplots(figsize=(8, 8))
@@ -1123,8 +1131,10 @@ class Halo():
                        label=r'$R_{{{}}}$'.format(self.R_subscript))
         f_subh[1].plot(x, -np.sqrt(self.R_scale**2 - x**2), color='r',
                        linestyle='--', linewidth=1)
-        f_subh[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[0], '-1'))
-        f_subh[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(proj[1], '-1'))
+        f_subh[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(
+            projection[0], '-1'))
+        f_subh[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(
+            projection[1], '-1'))
         metadata = [('Total no. of particles = {0}', '{}^3'
                      .format(self.box.nsample)),
                     ('Box size = {0} Mpc',
