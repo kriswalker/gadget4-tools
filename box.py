@@ -313,7 +313,8 @@ class Halo():
             Index of the desired group. The default is None.
         subhalo_index : int, optional
             Index of the desired subhalo. If group_index is specified, only the
-            subhalos within that group are considered. The default is None.
+            subhalos within that group are considered (i.e. subhalo_index is
+            the subhalo rank). The default is None.
         verbose : bool, optional
             Print all the things. The default is True.
 
@@ -327,14 +328,19 @@ class Halo():
             self.box = box
             self.path = box.path
             self.snapshot = box.snapshot
-        if subhalo_index is not None:
-            self.subhalo_index = subhalo_index
-            self.get_subhalo_params(verbose)
-        else:
-            self.subhalo_index = None
         if group_index is not None:
             self.group_index = group_index
             self.get_group_params(verbose)
+        if subhalo_index is not None:
+            if group_index is not None:
+                self.subhalo_index = np.argwhere(
+                    (self.box.subhalo['SubhaloRankInGr'] == subhalo_index) &
+                    (self.box.subhalo['SubhaloGroupNr'] == group_index))[0, 0]
+            else:
+                self.subhalo_index = subhalo_index
+            self.get_subhalo_params(verbose)
+        else:
+            self.subhalo_index = None
         self.get_halo_particle_positions()
         self.verbose = verbose
         if verbose and group_index is not None:
@@ -352,10 +358,6 @@ class Halo():
         """
 
         self.group_first_subhalo = self.box.group['FirstSub'][self.group_index]
-        # if self.subhalo_index is None:
-        #     self.subhalo_index = self.group_first_subhalo
-        #     self.get_subhalo_params(verbose=False)
-
         self.R_200 = self.box.group['R200'][self.group_index]
         self.R_500 = self.box.group['R500'][self.group_index]
         self.M_200 = self.box.group['M200'][self.group_index]
@@ -397,9 +399,10 @@ class Halo():
 
         """
 
-        self.group_index = self.box.subhalo['SubhaloGroupNr'][
-            self.subhalo_index]
-        self.get_group_params(verbose=False)
+        if not hasattr(self, 'group_index'):
+            self.group_index = self.box.subhalo['SubhaloGroupNr'][
+                self.subhalo_index]
+            self.get_group_params(verbose=False)
 
         self.halfmass_radius = self.box.subhalo['HalfmassRad'][
             self.subhalo_index]
@@ -446,7 +449,7 @@ class Halo():
                 self.group_first_subhalo + self.subhalo_rank]
             inds_sub = np.arange(ind + offset_sub_low, ind + offset_sub_high)
             self.inds_sub = inds_sub
-            # IDs_sub = self.box.ids[inds_sub]
+            self.subhalo_ids = self.box.ids[inds_sub]
             subhalo_coords = self.box.coords[inds_sub] - self.subhalo_position
             self.subhalo_coords = recenter(subhalo_coords, boxsize=25)
             self.number_of_particles = len(subhalo_coords)
@@ -454,14 +457,10 @@ class Halo():
         elif self.group_index is not None:
             offset_grp = self.group_len
             inds_grp = np.arange(ind, ind + offset_grp)
-            # IDs_grp = self.box.ids[inds_grp]
+            self.group_ids = self.box.ids[inds_grp]
             group_coords = self.box.coords[inds_grp] - self.group_position
             self.group_coords = recenter(group_coords, boxsize=25)
             self.number_of_particles = len(group_coords)
-
-        # inds_rem = np.arange(ind + offset_sub, ind + offset_grp)
-        # remain_coords = self.box.coords[inds_rem] - self.group_position
-        # self.remain_coords = recenter(remain_coords, boxsize=25)
 
         return
 
