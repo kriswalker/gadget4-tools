@@ -88,9 +88,9 @@ def tcirc(r, Vc):
 
 
 def vel_disp_nfw(x, conc, beta):
-    def integrand(s, b, c): ((s**(2 * b - 3) * np.log(1 + c * s)) /
-                             (1 + c * s)**2) - ((c * s**(2 * b - 2)) /
-                                                (1 + c * s)**3)
+    def integrand(s, b, c):
+        return ((s**(2 * b - 3) * np.log(1 + c * s)) / (1 + c * s)**2) -\
+            ((c * s**(2 * b - 2)) / (1 + c * s)**3)
     dispint = []
     for ri in x:
         dispint.append(quad(integrand, ri, np.inf, args=(beta, conc))[0])

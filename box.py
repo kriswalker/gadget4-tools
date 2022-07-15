@@ -253,11 +253,11 @@ class Box():
                         cmap='inferno', origin='lower')
         f_box[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(projection[0], '-1'))
         f_box[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(projection[1], '-1'))
-        metadata = [('No. of particles = {0}', '{}^3'.format(self.nsample)),
-                    ('Box size = {0} Mpc', self.box_size * self.length_norm),
-                    ('z = {0}', round(self.redshift, 3))]
+        metadata = ['${{{}}}^3$ particles'.format(self.nsample),
+                    'Box size = {} Mpc'.format(self.box_size*self.length_norm),
+                    'z = {}'.format(round(self.redshift, 3))]
         for mi, m in enumerate(metadata):
-            f_box[0].text(0.11, 0.03*(mi+3), m[0].format(m[1]), color='white')
+            f_box[0].text(0.11, 0.03*(mi+3), m, color='white')
         f_box[0].suptitle(title)
         f_box[0].tight_layout()
         if save:
@@ -745,7 +745,6 @@ class Halo():
                 concentration = self.get_concentration(v=200)
             if beta is None:
                 beta = np.mean(self.beta_profile[inner:outer])
-            # print('\nbeta = {}\n'.format(b))
             self.radial_dispersion_profile_model = model[0](
                 rad/self.R_scale, concentration, beta)
 
@@ -1089,10 +1088,10 @@ class Halo():
             f_angmom[0].savefig(savefile, dpi=300)
             plt.close(f_angmom[0])
 
-    def plot_subhalo(self, projection='xy', extent=[-2, 2, -2, 2], title=None,
-                     save=False, savefile=None):
+    def plot_halo(self, projection='xy', extent=[-2, 2, -2, 2], title=None,
+                  save=False, savefile=None):
         """
-        2D plot of the subhalo particle distribution.
+        2D plot of the halo particle distribution.
 
         Parameters
         ----------
@@ -1134,17 +1133,24 @@ class Halo():
             projection[0], '-1'))
         f_subh[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(
             projection[1], '-1'))
-        metadata = [('Total no. of particles = {0}', '{}^3'
-                     .format(self.box.nsample)),
-                    ('Box size = {0} Mpc',
-                     self.box.box_size * self.box.length_norm),
-                    ('z = {0}', round(self.box.redshift, 3)),
-                    ('Subhalo {0} ({1})'.format(self.subhalo_rank,
-                                                self.subhalo_index), ''),
-                    ('Group {0}', self.group_index)]
+        metadata = ['{} particles'.format(self.number_of_particles),
+                    '$R_{{{0}}}$ = {1} Mpc'.format(
+                        self.R_subscript,
+                        round(self.R_scale * self.box.length_norm, 3)),
+                    'z = {}'.format(round(self.box.redshift, 3)),
+                    'Group {}'.format(self.group_index)]
+        if self.subhalo_index is not None:
+            metadata.insert(3, 'Subhalo {0} ({1})'.format(
+                self.subhalo_rank, self.subhalo_index))
+            metadata.insert(2, r'$M={0}\times 10^{{{1}}}\,M_\odot$'.format(
+                round(self.subhalo_mass * self.box.mass_norm, 2), '10'))
+        else:
+            metadata.insert(2,
+                            r'$M_{{{0}}}={1}\times10^{{{2}}}\,M_\odot$'.format(
+                                200, round(self.M_200 * self.box.mass_norm, 2),
+                                '10'))
         for mi, m in enumerate(metadata):
-            f_subh[0].text(0.12, 0.03*(mi+3.3), m[0].format(m[1]),
-                           color='white')
+            f_subh[0].text(0.12, 0.03*(mi+3.3), m, color='white')
         f_subh[0].suptitle(title)
         f_subh[0].tight_layout()
         f_subh[0].legend()
@@ -1224,7 +1230,7 @@ class Halo():
         length_norm = self.box.unit_length/cm_per_Mpc
         mass_norm = self.box.unit_mass/g_per_1e10Msun
         pretty_print([self.group_index,
-                      len(self.group_coords),
+                      self.number_of_particles,
                       self.R_200*length_norm*1e3,
                       self.M_200 * mass_norm,
                       self.group_mass*mass_norm,
