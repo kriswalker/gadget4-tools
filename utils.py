@@ -94,7 +94,20 @@ def vel_disp_nfw(x, conc, beta):
     dispint = []
     for ri in x:
         dispint.append(quad(integrand, ri, np.inf, args=(beta, conc))[0])
-    return np.sqrt(g(conc) * (1 + conc * x)**2 * x**(1 - 2 * beta) * dispint)
+    return np.sqrt(g(conc) * (1 + conc * x)**2 * x**(1 - 2 * beta) *
+                   np.array(dispint))
+
+
+def hubble_parameter(z, H0, Omega_m, Omega_Lambda, Omega_k):
+    return H0 * np.sqrt(Omega_m * (1 + z)**3 +
+                        Omega_k * (1 + z)**2 +
+                        Omega_Lambda)
+
+
+def to_physical_velocity(velocity, coord, z, H0, **Omega):
+    scale_factor = 1 / (1 + z)
+    return velocity * np.sqrt(scale_factor) + \
+        coord * hubble_parameter(z, H0, **Omega)
 
 
 def pretty_print(quantities, labels, title):
