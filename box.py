@@ -2,11 +2,12 @@ import glob
 import numpy as np
 import h5py
 import time
-from gadget4tools.utils import recenter, approx_concentration, pretty_print, \
-    hubble_parameter
+import matplotlib
 import matplotlib.pyplot as plt
 from sphviewer.tools import QuickView
 from lmfit import Minimizer
+from gadget4tools.utils import recenter, approx_concentration, pretty_print, \
+    to_physical_velocity, interpolate2D, magnitude, radial_velocity
 
 
 class Box():
@@ -336,9 +337,13 @@ class Halo():
             else:
                 self.subhalo_index = subhalo_index
             self.get_subhalo_params(verbose)
+            self.relative_coords = self.subhalo_relative_coords
+            self.relative_vels = self.subhalo_relative_vels
         else:
             self.subhalo_index = None
-        self.get_halo_particle_positions()
+            self.relative_coords = self.group_relative_coords
+            self.relative_vels = self.group_relative_vels
+        self.get_halo_particle_positions_and_velocities()
         self.verbose = verbose
         if verbose and group_index is not None:
             self.group_info()
@@ -374,8 +379,8 @@ class Halo():
             self.group_number_of_subhalos]
 
         coords_rel = self.box.coords - self.group_position
-        self.relative_coords = recenter(coords_rel, self.box.box_size)
-        self.relative_vels = self.box.vels - self.group_velocity
+        self.group_relative_coords = recenter(coords_rel, self.box.box_size)
+        self.group_relative_vels = self.box.vels - self.group_velocity
 
         self.V_200 = self.box.group['V200'][self.group_index]
         self.V_200 = self.box.group['V500'][self.group_index]
@@ -426,8 +431,8 @@ class Halo():
             self.subhalo_index]
 
         coords_rel = self.box.coords - self.subhalo_position
-        self.relative_coords = recenter(coords_rel, self.box.box_size)
-        self.relative_vels = self.box.vels - self.subhalo_velocity
+        self.subhalo_relative_coords = recenter(coords_rel, self.box.box_size)
+        self.subhalo_relative_vels = self.box.vels - self.subhalo_velocity
 
         self.R_scale = self.halfmass_radius
         self.M_scale = self.subhalo_mass / 2
@@ -438,11 +443,15 @@ class Halo():
 
         return
 
-    def get_halo_particle_positions(self):
+    def get_halo_particle_positions_and_velocities(self):
         """
         returns positions of all the particles in the group
 
         """
+
+        def index(inds):
+            return self.box.ids[inds], self.relative_coords[inds], \
+                self.relative_vels[inds]
 
         most_bound_particle = self.box.subhalo['IDMostbound'][
             self.group_first_subhalo]
@@ -454,18 +463,44 @@ class Halo():
                     self.group_first_subhalo + s]
             offset_sub_high = offset_sub_low + self.box.subhalo['Len'][
                 self.group_first_subhalo + self.subhalo_rank]
-            inds_sub = np.arange(ind + offset_sub_low, ind + offset_sub_high)
-            self.inds_sub = inds_sub
-            self.subhalo_particle_ids = self.box.ids[inds_sub]
-            self.subhalo_particle_coords = self.box.coords[inds_sub]
-            self.number_of_particles = len(self.subhalo_particle_coords)
+            self.particle_inds = np.arange(ind + offset_sub_low,
+                                           ind + offset_sub_high)
+            self.particle_ids, self.particle_relative_coords, \
+                self.particle_relative_vels = index(self.particle_inds)
+            self.number_of_particles = self.subhalo_number_of_particles
 
-        if self.group_index is not None:
-            offset_grp = self.group_number_of_particles
-            inds_grp = np.arange(ind, ind + offset_grp)
-            self.group_particle_ids = self.box.ids[inds_grp]
-            self.group_particle_coords = self.box.coords[inds_grp]
-            self.number_of_particles = len(self.group_particle_coords)
+        elif self.group_index is not None:
+            offset_group = self.group_number_of_particles
+            self.particle_inds = np.arange(ind, ind + offset_group)
+            self.particle_ids, self.particle_relative_coords, \
+                self.particle_relative_vels = index(self.particle_inds)
+            self.number_of_particles = self.group_number_of_particles
+
+            offset_firstsub = self.box.subhalo['Len'][
+                self.group_first_subhalo]
+            self.particle_inds_firstsub = np.arange(ind,
+                                                    ind + offset_firstsub)
+            self.particle_ids_firstsub, \
+                self.particle_relative_coords_firstsub, \
+                self.particle_relative_vels_firstsub = index(
+                    self.particle_inds_firstsub)
+
+            offset_subs = offset_firstsub
+            for s in range(1, self.group_number_of_subhalos):
+                offset_subs += self.box.subhalo['Len'][
+                    self.group_first_subhalo + s]
+            self.particle_inds_subs = np.arange(ind + offset_firstsub,
+                                                ind + offset_subs)
+            self.particle_ids_subs, self.particle_relative_coords_subs, \
+                self.particle_relative_vels_subs = index(
+                    self.particle_inds_subs)
+
+            offset_fuzz = offset_group
+            self.particle_inds_fuzz = np.arange(ind + offset_subs,
+                                                ind + offset_fuzz)
+            self.particle_ids_fuzz, self.particle_relative_coords_fuzz, \
+                self.particle_relative_vels_fuzz = index(
+                    self.particle_inds_fuzz)
 
         return
 
@@ -563,7 +598,7 @@ class Halo():
 
         """
 
-        r = np.sqrt(np.sum(self.relative_coords**2, axis=1))
+        r = magnitude(self.relative_coords)[0]
         # r > 0 so log() doesn't diverge
         inds = np.argwhere((r < cutoff_radii[1]*self.R_scale) & (r > 0))
         self.particle_indices = inds.flatten()
@@ -614,6 +649,8 @@ class Halo():
             Inner and outer radii within which to perform the binning.
         model : function, optional
             Model to fit to the profile. The default is None.
+        log : bool, optional
+            Use logarithmically-spaced bins. The default is True.
 
         """
 
@@ -637,6 +674,7 @@ class Halo():
                 {'r': fit_radius})
             self.density_profile_model = self.box.critical_density * \
                 model[0](self.density_fit_params, rad)
+            self.c_200 = self.get_concentration(v=200)
 
         return
 
@@ -677,6 +715,34 @@ class Halo():
 
         return
 
+    def calc_log_density_slope_profile(self, nbins, cutoff_radii, model=None):
+        """
+        Compute the log slope of the density profile of the group or subhalo.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of radial bins.
+        cutoff_radii : tuple of floats
+            Inner and outer radii within which to perform the binning.
+        model : function, optional
+            Model to fit to the profile. The default is None.
+
+        """
+        self.calc_density_profile(nbins, cutoff_radii, model=model,
+                                  log=True)
+
+        def density_slope(density_profile):
+            return np.diff(np.log(density_profile)) / \
+                np.diff(np.log(self.rcenter[:-1]))
+
+        self.log_density_slope_profile = density_slope(self.density_profile)
+        if model is not None:
+            self.log_density_slope_profile_model = density_slope(
+                self.density_profile_model)
+
+        return
+
     def calc_velocity_dispersion(self, v, x=None):
         """
         Calculate the velocity dispersion of a group of particles.
@@ -704,10 +770,7 @@ class Halo():
         disp = np.sqrt(np.sum(vms - vsm))
 
         if x is not None:
-            sqmag = np.sum(x**2, axis=1)
-            rhat = x / np.sqrt(sqmag.reshape(len(sqmag), 1))
-            vrad = np.sum(v*rhat, axis=1)
-
+            vrad = radial_velocity(x, v)
             vsmrad = np.mean(vrad)**2
             vmsrad = np.mean(vrad**2)
             disprad = np.sqrt(vmsrad - vsmrad)
@@ -854,7 +917,8 @@ class Halo():
 
     def plot_density_profile(self, nbins, cutoff_radii, plot_model=False,
                              model=None, style=('C0', '-'), xlim=None,
-                             ylim=None, title=None, save=False, savefile=None):
+                             ylim=None, with_rsq=False, with_slope=False,
+                             title=None, save=False, savefile=None):
         """
         Plot the density profile of the group or subhalo.
 
@@ -887,49 +951,76 @@ class Halo():
         if not hasattr(self, 'density_profile'):
             self.calc_density_profile(nbins, cutoff_radii, model)
 
-        f_dens = plt.subplots(2, 1, sharex=True, figsize=(8, 10))
+        nrows = 1 + len(np.where([with_rsq, with_slope])[0])
+        # f_dens = plt.subplots(nrows, 1, sharex=True, figsize=(6, nrows*6))
+        fig = plt.figure(figsize=(5, nrows*5))
         rad = self.rcenter[:-1] / self.R_scale
-        f_dens[1][0].plot(rad, self.density_profile/self.box.critical_density,
-                          alpha=0.8, color=style[0], linestyle=style[1],
-                          label='data')
-        f_dens[1][1].plot(
-            rad, (self.density_profile/self.box.critical_density) *
-            rad**2, alpha=0.8, color=style[0], linestyle=style[1])
+
+        i = 1
+        ax1 = fig.add_subplot(nrows, 1, i)
+        ax1.plot(rad, self.density_profile/self.box.critical_density,
+                 alpha=0.8, color=style[0], linestyle=style[1], linewidth=3,
+                 label='data')
         if plot_model:
-            f_dens[1][0].plot(
+            ax1.plot(
                 rad, self.density_profile_model/self.box.critical_density,
-                alpha=0.8, color='k', linestyle='--', label='NFW')
-            f_dens[1][1].plot(
-                rad, (self.density_profile_model/self.box.critical_density) *
-                rad**2, alpha=0.8, color='k', linestyle='--')
-        # f_dens[1][0].axvline(self.box.convergence_radius/self.R_scale,
-        #                      color='r', linestyle='--',
-        #                      label='convergence radius')
-        # f_dens[1][1].axvline(self.box.convergence_radius/self.R_scale,
-        #                      color='r', linestyle='--')
-        f_dens[1][0].set_xscale('log')
-        f_dens[1][0].set_yscale('log')
-        f_dens[1][1].set_xscale('log')
-        f_dens[1][1].set_yscale('log')
+                alpha=0.8, color='k', linestyle='--', linewidth=2, label='NFW')
         if xlim is None:
-            xlim = cutoff_radii
+            xlim = (min(rad), max(rad))
         if ylim is None:
             dens = self.density_profile/self.box.critical_density
             ylim = [dens[-1], 2*max(dens)]
-        f_dens[1][0].set_xlim(xlim[0], xlim[1])
-        f_dens[1][0].set_ylim(ylim[0], ylim[1])
-        f_dens[1][1].set_xlim(xlim[0], xlim[1])
-        f_dens[1][0].set_xlabel(r'$r/R_{{{}}}$'.format(self.R_subscript))
-        f_dens[1][0].set_ylabel(r'$\rho/\rho_\mathrm{crit}$')
-        f_dens[1][1].set_xlabel(r'$r/R_{{{}}}$'.format(self.R_subscript))
-        f_dens[1][1].set_ylabel(r'$(\rho/\rho_\mathrm{{{0}}})(r/R_{{{1}}})^2$'
-                                .format('crit', self.R_subscript))
-        f_dens[1][0].legend(loc='center left', bbox_to_anchor=(1, 0))
-        f_dens[0].suptitle(title)
-        f_dens[0].tight_layout()
+        ax1.set_ylim(ylim[0], ylim[1])
+        ax1.set_yscale('log')
+        ax1.set_ylabel(r'$\rho/\rho_\mathrm{crit}$')
+        axes = [ax1]
+
+        if with_rsq:
+            i += 1
+            ax2 = fig.add_subplot(nrows, 1, i)
+            ax2.plot(
+                rad, (self.density_profile/self.box.critical_density) *
+                rad**2, alpha=0.8, color=style[0], linestyle=style[1],
+                linewidth=3)
+            if plot_model:
+                ax2.plot(
+                    rad, (self.density_profile_model /
+                          self.box.critical_density) * rad**2,
+                    alpha=0.8, color='k', linestyle='--', linewidth=2)
+            ax2.set_yscale('log')
+            ax2.set_ylabel(
+                r'$(\rho/\rho_\mathrm{{{0}}})(r/R_{{{1}}})^2$'
+                .format('crit', self.R_subscript))
+            axes.append(ax2)
+
+        if with_slope:
+            i += 1
+            ax3 = fig.add_subplot(nrows, 1, i)
+            self.calc_log_density_slope_profile(nbins, cutoff_radii,
+                                                model=model)
+            rad = self.redge[:-2] / self.R_scale
+            ax3.plot(rad, self.log_density_slope_profile,
+                     alpha=0.8, color=style[0], linestyle=style[1],
+                     linewidth=3)
+            if plot_model:
+                ax3.plot(rad, self.log_density_slope_profile_model,
+                         alpha=0.8, color='k', linewidth=2, linestyle='--')
+            ax3.set_ylabel(r'${\rm d}\ln\rho/{\rm d}\ln r$')
+            axes.append(ax3)
+
+        for j, ax in enumerate(axes):
+            label = 'collisional' if j == 0 else None
+            ax.axvspan(xlim[0], self.box.convergence_radius/self.R_scale,
+                       color='r', alpha=0.3, label=label)
+            ax.set_xlim(xlim[0], xlim[1])
+            ax.set_xscale('log')
+            ax.set_xlabel(r'$r/R_{{{}}}$'.format(self.R_subscript))
+        ax1.legend()
+        fig.suptitle(title)
+        fig.tight_layout()
         if save:
-            f_dens[0].savefig(savefile, dpi=300)
-            plt.close(f_dens[0])
+            fig.savefig(savefile, dpi=300)
+            plt.close(fig)
 
     def plot_mass_profile(self, nbins, cutoff_radii, plot_model=False,
                           model=None, style=('C0', '-'), xlim=None, ylim=None,
@@ -1197,6 +1288,55 @@ class Halo():
         if save:
             f_subh[0].savefig(savefile, dpi=500)
             plt.close(f_subh[0])
+
+    def plot_phase_space(self, outer_radius=4, kde=False, save=False,
+                         savefile=None):
+
+        def phase_space(inds):
+            coords, vels = self.relative_coords[inds], self.relative_vels[inds]
+
+            H0 = self.box.hubble_constant * self.box.h
+            vels = to_physical_velocity(vels, coords, self.box.redshift, H0,
+                                        Omega_m=self.box.Omega0,
+                                        Omega_Lambda=self.box.OmegaLambda,
+                                        Omega_k=0)
+            return magnitude(coords)[0], radial_velocity(coords, vels)
+
+        r_all = magnitude(self.relative_coords)[0]
+        interior = np.argwhere((r_all < outer_radius*self.R_scale) &
+                               (r_all > 0)).flatten()
+
+        fps = plt.subplots(figsize=(7, 5))
+        if kde:
+            r, vr = phase_space(interior)
+            kde_data = np.vstack((r[~np.isnan(vr)], vr[~np.isnan(vr)])).T
+            rax, vax, density = interpolate2D(kde_data, kernel='gaussian',
+                                              bandwidth=0.02, resolution=100)
+            fps[1].pcolormesh(rax/self.R_scale, vax, density)
+        else:
+            comp_inds = [self.particle_inds_firstsub,
+                         self.particle_inds_subs,
+                         self.particle_inds_fuzz]
+            comp_inds_flat = np.hstack(comp_inds)
+            comp_remain = np.setdiff1d(interior, comp_inds_flat)
+            comp_inds.append(comp_remain)
+            cmap = matplotlib.cm.get_cmap('inferno')
+            colors = [cmap(0.4), cmap(0.6), cmap(0.8), 'grey']
+            labels = ['main halo', 'subhalos', 'fuzz', None]
+            for i, comp in enumerate(comp_inds):
+                r, vr = phase_space(comp)
+                fps[1].scatter(r/self.R_scale, vr, alpha=0.5, marker='.', s=1,
+                               color=colors[i], label=labels[i])
+            fps[1].spines['bottom'].set_position('zero')
+            fps[1].spines['top'].set_color('none')
+            fps[1].spines['right'].set_color('none')
+            fps[1].legend()
+        fps[1].set_xlabel(r'$r/R_{200}$')
+        fps[1].set_ylabel(r'$v_r$')
+        fps[1].set_xlim(0, outer_radius)
+        fps[0].tight_layout()
+        if save:
+            fps[0].savefig(savefile)
 
     def get_concentration(self, v=200):
         """

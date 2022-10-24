@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.integrate import quad
 from scipy.interpolate import interp1d
+from sklearn.neighbors import KernelDensity
 import tabulate
 
 
@@ -108,6 +109,49 @@ def to_physical_velocity(velocity, coord, z, H0, **Omega):
     scale_factor = 1 / (1 + z)
     return velocity * np.sqrt(scale_factor) + \
         coord * hubble_parameter(z, H0, **Omega)
+
+
+def magnitude(vec):
+    vsq = np.sum(vec**2, axis=1)
+    vmag = np.sqrt(vsq.reshape(len(vsq), 1))
+    return vmag.flatten(), vec / vmag
+
+
+def radial_velocity(coords, vels):
+    rhat = magnitude(coords)[1]
+    return np.sum(vels*rhat, axis=1).flatten()
+
+
+def interpolate2D(data, kernel, bandwidth, resolution):
+    """
+    2D interpolation using a kernel density estimator
+
+    """
+
+    xdata = data[:, 0]
+    ydata = data[:, 1]
+
+    # normalize data to range [0,1]
+    xmin = np.min(xdata)
+    xdata_ = xdata - xmin
+    xmax = np.max(xdata_)
+    data[:, 0] = xdata_ / xmax
+
+    ymin = np.min(ydata)
+    ydata_ = ydata - ymin
+    ymax = np.max(ydata_)
+    data[:, 1] = ydata_ / ymax
+
+    # interpolation grid
+    x = np.linspace(0, 1, resolution)
+    y = np.linspace(0, 1, resolution)
+    X, Y = np.meshgrid(x, y)
+    XY = np.stack((X.flatten(), Y.flatten()), axis=-1)
+
+    kde = KernelDensity(kernel=kernel, bandwidth=bandwidth).fit(data)
+    log_density = kde.score_samples(XY).reshape(resolution, resolution)
+
+    return (x * xmax) + xmin, (y * ymax) + ymin, np.exp(log_density)
 
 
 def pretty_print(quantities, labels, title):
