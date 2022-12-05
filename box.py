@@ -2,8 +2,9 @@ import glob
 import numpy as np
 import h5py
 import time
-import matplotlib
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
 from sphviewer.tools import QuickView
 from lmfit import Minimizer
 from gadget4tools.utils import recenter, approx_concentration, pretty_print, \
@@ -13,7 +14,7 @@ from gadget4tools.utils import recenter, approx_concentration, pretty_print, \
 class Box():
 
     def __init__(self, path, snapshot, snapshot_prefix='snapshot',
-                 verbose=True):
+                 component=1, verbose=True):
         """
         Box object containing parameters and methods for the simulation box as
         a whole.
@@ -33,6 +34,7 @@ class Box():
 
         self.path = path
         self.snapshot = snapshot
+        self.component = component
 
         file = path + '{}_{:03d}.hdf5'
         if np.sort(glob.glob(file.format(snapshot_prefix,
@@ -69,14 +71,23 @@ class Box():
         snap = h5py.File(filename, 'r')
         params = {}
 
-        self.coords = snap['PartType1']['Coordinates'][()]
-        self.vels = snap['PartType1']['Velocities'][()]
-        self.ids = snap['PartType1']['ParticleIDs'][()]
+        self.coords = snap['PartType{}'.format(self.component)][
+            'Coordinates'][()]
+        self.vels = snap['PartType{}'.format(self.component)][
+            'Velocities'][()]
+        self.ids = snap['PartType{}'.format(self.component)][
+            'ParticleIDs'][()]
+        self.ids_dm = snap['PartType1']['ParticleIDs'][()]
+        self.tags = ['Gas', 'Dark matter', 'Disk', 'Bulge', 'Stars',
+                     'Boundary']
 
         self.particle_mass = list(snap['Header'].attrs['MassTable'])[1]
         self.redshift = snap['Header'].attrs['Redshift']
         self.box_size = snap['Parameters'].attrs['BoxSize']
-        self.nsample = snap['Parameters'].attrs['NSample']
+        try:
+            self.nsample = snap['Parameters'].attrs['NSample']
+        except KeyError:
+            self.nsample = 1
         self.hubble_constant = snap['Parameters'].attrs['HubbleParam']
         self.h = snap['Parameters'].attrs['Hubble']
         self.Omega0 = snap['Parameters'].attrs['Omega0']
@@ -343,7 +354,8 @@ class Halo():
             self.subhalo_index = None
             self.relative_coords = self.group_relative_coords
             self.relative_vels = self.group_relative_vels
-        self.get_halo_particle_positions_and_velocities()
+        if self.box.component == 1:
+            self.get_halo_particle_positions_and_velocities()
         self.verbose = verbose
         if verbose and group_index is not None:
             self.group_info()
@@ -425,7 +437,7 @@ class Halo():
         self.subhalo_number_of_particles = self.box.subhalo['Len'][
             self.subhalo_index]
         self.subhalo_index_most_bound = np.argwhere(
-            (self.box.ids == self.box.subhalo['IDMostbound'][
+            (self.box.ids_dm == self.box.subhalo['IDMostbound'][
                 self.subhalo_index])).flatten()[0]
         self.subhalo_rank = self.box.subhalo['SubhaloRankInGr'][
             self.subhalo_index]
@@ -1214,8 +1226,9 @@ class Halo():
             f_angmom[0].savefig(savefile, dpi=300)
             plt.close(f_angmom[0])
 
-    def plot_halo(self, projection='xy', extent=[-2, 2, -2, 2], title=None,
-                  save=False, savefile=None):
+    def plot_halo(self, projection='xy', extent=[-2, 2, -2, 2],
+                  sphviewer=True, bins=1000, log=False, cmap=None,
+                  title=None, dpi=500, save=False, savefile=None):
         """
         2D plot of the halo particle distribution.
 
@@ -1236,35 +1249,60 @@ class Halo():
         """
 
         extent = self.R_scale * np.array(extent)
-        coords = np.copy(self.relative_coords)
+        coords_ = np.copy(self.relative_coords)
+        r = magnitude(coords_)[0]
+        sx, sy = 2 * max(np.abs(extent[:2])), 2 * max(np.abs(extent[2:]))
+        theta = np.arctan(sy / sx)
+        Rlim = sy / (2 * np.sin(theta))
+        inds = np.argwhere((r < 20 * Rlim)).flatten()
+        coords = coords_[inds]
         order = []
         for p in projection:
             order.append(
                 0 if p == 'x' else 1 if p == 'y' else 2 if p == 'z' else 3)
         order.append(list(set([0, 1, 2]) - set(order))[0])
         coords[:, [0, 1, 2]] = coords[:, order]
-        qv_parallel = QuickView(coords, r='infinity', plot=False,
-                                x=0, y=0, z=0, extent=list(extent))
         f_subh = plt.subplots(figsize=(8, 8))
-        f_subh[1].imshow(qv_parallel.get_image(),
-                         extent=qv_parallel.get_extent(), cmap='inferno',
-                         origin='lower')
+        if cmap is None:
+            cmaps = ['magma', 'inferno', 'twilight_shifted',
+                     'twilight_shifted', 'cividis', 'twilight_shifted']
+            cmap = cmaps[self.box.component]
+        if sphviewer:
+            qv_parallel = QuickView(coords, r='infinity', plot=False,
+                                    x=0, y=0, z=0, extent=list(extent))
+            norm = mpl.colors.LogNorm() if log else mpl.colors.Normalize()
+            f_subh[1].imshow(qv_parallel.get_image(),
+                             extent=qv_parallel.get_extent(), cmap=cmap,
+                             origin='lower', norm=norm)
+        else:
+            norm = mpl.colors.LogNorm() if log else mpl.colors.Normalize()
+            f_subh[1].hist2d(coords[:, 0], coords[:, 1], bins=bins,
+                             cmap=cmap, norm=norm)
         x = np.linspace(-self.R_scale, self.R_scale, 100)
         f_subh[1].plot(x, np.sqrt(self.R_scale**2 - x**2), color='r',
                        linestyle='--', linewidth=1,
                        label=r'$R_{{{}}}$'.format(self.R_subscript))
         f_subh[1].plot(x, -np.sqrt(self.R_scale**2 - x**2), color='r',
                        linestyle='--', linewidth=1)
+        f_subh[1].set_xlim(*extent[:2])
+        f_subh[1].set_ylim(*extent[2:])
         f_subh[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(
             projection[0], '-1'))
         f_subh[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(
             projection[1], '-1'))
-        metadata = ['{} particles'.format(self.number_of_particles),
-                    '$R_{{{0}}}$ = {1} Mpc'.format(
-                        self.R_subscript,
-                        round(self.R_scale * self.box.length_norm, 3)),
-                    'z = {}'.format(round(self.box.redshift, 3)),
-                    'Group {}'.format(self.group_index)]
+        if self.box.component == 1:
+            metadata = ['{} particles'.format(self.number_of_particles),
+                        '$R_{{{0}}}$ = {1} Mpc'.format(
+                            self.R_subscript,
+                            round(self.R_scale * self.box.length_norm, 3)),
+                        'z = {}'.format(round(self.box.redshift, 3)),
+                        'Group {}'.format(self.group_index)]
+        else:
+            metadata = ['$R_{{{0}}}$ = {1} Mpc'.format(
+                            self.R_subscript,
+                            round(self.R_scale * self.box.length_norm, 3)),
+                        'z = {}'.format(round(self.box.redshift, 3)),
+                        'Group {}'.format(self.group_index)]
         if self.subhalo_index is not None:
             metadata.insert(3, 'Subhalo {0} ({1})'.format(
                 self.subhalo_rank, self.subhalo_index))
@@ -1282,24 +1320,30 @@ class Halo():
                                 200, round(mass, 2), str(int(10 + exponent))))
         for mi, m in enumerate(metadata):
             f_subh[0].text(0.12, 0.03*(mi+3.3), m, color='white')
+        if title is None:
+            title = self.box.tags[self.box.component]
         f_subh[0].suptitle(title)
         f_subh[0].tight_layout()
         f_subh[0].legend()
         if save:
-            f_subh[0].savefig(savefile, dpi=500)
+            f_subh[0].savefig(savefile, dpi=dpi)
             plt.close(f_subh[0])
+        return f_subh
 
-    def plot_phase_space(self, outer_radius=4, kde=False, save=False,
-                         savefile=None):
+    def plot_phase_space(self, outer_radius=4, kde=False, histogram=True,
+                         bins=100, by_components=False, comoving_velocity=True,
+                         vlim=None, save=False, savefile=None):
 
         def phase_space(inds):
             coords, vels = self.relative_coords[inds], self.relative_vels[inds]
 
             H0 = self.box.hubble_constant * self.box.h
-            vels = to_physical_velocity(vels, coords, self.box.redshift, H0,
-                                        Omega_m=self.box.Omega0,
-                                        Omega_Lambda=self.box.OmegaLambda,
-                                        Omega_k=0)
+            if comoving_velocity:
+                vels = to_physical_velocity(vels, coords,
+                                            self.box.redshift, H0,
+                                            Omega_m=self.box.Omega0,
+                                            Omega_Lambda=self.box.OmegaLambda,
+                                            Omega_k=0)
             return magnitude(coords)[0], radial_velocity(coords, vels)
 
         r_all = magnitude(self.relative_coords)[0]
@@ -1313,14 +1357,14 @@ class Halo():
             rax, vax, density = interpolate2D(kde_data, kernel='gaussian',
                                               bandwidth=0.02, resolution=100)
             fps[1].pcolormesh(rax/self.R_scale, vax, density)
-        else:
+        elif by_components:
             comp_inds = [self.particle_inds_firstsub,
                          self.particle_inds_subs,
                          self.particle_inds_fuzz]
             comp_inds_flat = np.hstack(comp_inds)
             comp_remain = np.setdiff1d(interior, comp_inds_flat)
             comp_inds.append(comp_remain)
-            cmap = matplotlib.cm.get_cmap('inferno')
+            cmap = mpl.cm.get_cmap('inferno')
             colors = [cmap(0.4), cmap(0.6), cmap(0.8), 'grey']
             labels = ['main halo', 'subhalos', 'fuzz', None]
             for i, comp in enumerate(comp_inds):
@@ -1331,12 +1375,34 @@ class Halo():
             fps[1].spines['top'].set_color('none')
             fps[1].spines['right'].set_color('none')
             fps[1].legend()
+        else:
+            r, vr = phase_space(interior)
+            if histogram:
+                fps[1].hist2d(r/self.R_scale, vr, bins=bins,
+                              norm=mpl.colors.LogNorm())
+            else:
+                fps[1].scatter(r/self.R_scale, vr, alpha=0.5, marker='.', s=1,
+                               color='C1')
+            fps[1].spines['bottom'].set_position('zero')
+            fps[1].spines['top'].set_color('none')
+            fps[1].spines['right'].set_color('none')
         fps[1].set_xlabel(r'$r/R_{200}$')
         fps[1].set_ylabel(r'$v_r$')
         fps[1].set_xlim(0, outer_radius)
+        if vlim is not None:
+            fps[1].set_ylim(-vlim, vlim)
         fps[0].tight_layout()
         if save:
             fps[0].savefig(savefile)
+
+    def get_formation_time(self, frac=0.5, redshift=True, time=False):
+        self.get_merger_tree()
+        if redshift:
+            f = interp1d(self.tree_masses, self.tree_redshifts)
+            self.formation_redshift = float(f(frac * self.tree_masses[-1]))
+        if time:
+            f = interp1d(self.tree_masses, self.tree_times)
+            self.formation_time = float(f(frac * self.tree_masses[-1]))
 
     def get_concentration(self, v=200):
         """
