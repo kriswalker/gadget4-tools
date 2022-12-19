@@ -34,17 +34,60 @@ class Box():
 
         self.path = path
         self.snapshot = snapshot
+        self.snapshot_prefix = snapshot_prefix
         self.component = component
 
         file = path + '{}_{:03d}.hdf5'
         if np.sort(glob.glob(file.format(snapshot_prefix,
                                          snapshot))).size != 0:
-            self.snap = self.read_snap(file.format(snapshot_prefix, snapshot),
-                                       verbose)
+            self.read_snap(file.format(snapshot_prefix, snapshot), verbose)
+        else:
+            print('No snapshot files found.' +
+                  ' Attempting to read halo catalogues...')
         if np.sort(glob.glob(file.format('fof_subhalo_tab',
                                          snapshot))).size != 0:
             self.group, self.subhalo = self.read_groups(file.format(
                 'fof_subhalo_tab', snapshot), verbose)
+        else:
+            raise ValueError('No snapshot or halo catalogue files found! Are' +
+                             ' you sure you have specified the correct' +
+                             ' directory?')
+
+    def read_parameters(self, datafile):
+
+        self.redshift = datafile['Header'].attrs['Redshift']
+        self.box_size = datafile['Parameters'].attrs['BoxSize']
+        try:
+            self.nsample = datafile['Parameters'].attrs['NSample']
+        except KeyError:
+            self.nsample = 1
+        self.hubble_constant = datafile['Parameters'].attrs['HubbleParam']
+        self.h = datafile['Parameters'].attrs['Hubble']
+        self.Omega0 = datafile['Parameters'].attrs['Omega0']
+        self.OmegaBaryon = datafile['Parameters'].attrs['OmegaBaryon']
+        self.OmegaLambda = datafile['Parameters'].attrs['OmegaLambda']
+        self.unit_length = datafile['Parameters'].attrs['UnitLength_in_cm']
+        self.unit_mass = datafile['Parameters'].attrs['UnitMass_in_g']
+        self.unit_velocity = datafile['Parameters'].attrs[
+            'UnitVelocity_in_cm_per_s']
+
+        cm_per_Mpc = 3.085678e24
+        g_per_1e10Msun = 1.989e43
+        cmps_per_kmps = 1.0e5
+        self.length_norm = self.unit_length / cm_per_Mpc
+        self.mass_norm = self.unit_mass / g_per_1e10Msun
+        self.velocity_norm = self.unit_velocity / cmps_per_kmps
+
+        self.OmegaDM = self.Omega0 - self.OmegaBaryon
+        self.mean_interparticle_spacing = self.box_size / self.nsample
+        self.convergence_radius = 0.77 * \
+            (3 * self.OmegaDM / (800 * np.pi))**(1/3) \
+            * self.mean_interparticle_spacing / (1 + self.redshift)
+
+        self.gravitational_constant = 43.0071 * self.mass_norm / \
+            (self.length_norm * self.velocity_norm**2)
+
+        return
 
     def read_snap(self, filename, verbose):
         """
@@ -57,11 +100,6 @@ class Box():
         verbose : bool
             Print all the things.
 
-        Returns
-        -------
-        params : dict
-            Snapshot data and parameters.
-
         """
 
         if verbose:
@@ -69,7 +107,7 @@ class Box():
             print("LOADING {0}...".format(filename))
 
         snap = h5py.File(filename, 'r')
-        params = {}
+        self.read_parameters(snap)
 
         self.coords = snap['PartType{}'.format(self.component)][
             'Coordinates'][()]
@@ -78,44 +116,18 @@ class Box():
         self.ids = snap['PartType{}'.format(self.component)][
             'ParticleIDs'][()]
         self.ids_dm = snap['PartType1']['ParticleIDs'][()]
+        self.particle_mass = list(snap['Header'].attrs['MassTable'])[
+            self.component]
         self.tags = ['Gas', 'Dark matter', 'Disk', 'Bulge', 'Stars',
                      'Boundary']
-
-        self.particle_mass = list(snap['Header'].attrs['MassTable'])[1]
-        self.redshift = snap['Header'].attrs['Redshift']
-        self.box_size = snap['Parameters'].attrs['BoxSize']
-        try:
-            self.nsample = snap['Parameters'].attrs['NSample']
-        except KeyError:
-            self.nsample = 1
-        self.hubble_constant = snap['Parameters'].attrs['HubbleParam']
-        self.h = snap['Parameters'].attrs['Hubble']
-        self.Omega0 = snap['Parameters'].attrs['Omega0']
-        self.OmegaBaryon = snap['Parameters'].attrs['OmegaBaryon']
-        self.OmegaLambda = snap['Parameters'].attrs['OmegaLambda']
-        self.unit_length = snap['Parameters'].attrs['UnitLength_in_cm']
-        self.unit_mass = snap['Parameters'].attrs['UnitMass_in_g']
-
-        cm_per_Mpc = 3.085678e+24
-        g_per_1e10Msun = 1.989e43
-        self.length_norm = self.unit_length / cm_per_Mpc
-        self.mass_norm = self.unit_mass / g_per_1e10Msun
-
-        self.OmegaDM = self.Omega0 - self.OmegaBaryon
-        self.mean_interparticle_spacing = self.box_size / self.nsample
-        self.convergence_radius = 0.77 * \
-            (3 * self.OmegaDM / (800 * np.pi))**(1/3) \
-            * self.mean_interparticle_spacing / (1 + self.redshift)
-
-        self.gravitational_constant = 43.02
-
         snap.close()
+
         if verbose:
             end = time.time()
             print("...LOADED in {0} seconds\n".format(round(end-start, 2)))
             self.box_info()
 
-        return params
+        return
 
     def read_groups(self, filename, verbose):
         """
@@ -138,6 +150,8 @@ class Box():
         """
 
         subh = h5py.File(filename, 'r')
+        if not hasattr(self, 'redshift'):
+            self.read_parameters(subh)
 
         group = {}
         group['R200'] = subh['Group']['Group_R_Crit200'][()]
@@ -334,6 +348,8 @@ class Halo():
             self.box = box
             self.path = box.path
             self.snapshot = box.snapshot
+            self.snapshot_prefix = box.snapshot_prefix
+            self.component = box.component
         else:
             raise ValueError("{} is not a \
                              gadget4tools.box.Box object".format(box))
@@ -527,6 +543,10 @@ class Halo():
             is False.
 
         """
+
+        if self.subhalo_index is None:
+            raise ValueError('Cannot retrieve merger tree because no subhalo' +
+                             ' index has been provided.')
 
         if self.verbose:
             print("LOADING {0}...".format(self.path + 'trees.hdf5'))
@@ -1254,7 +1274,8 @@ class Halo():
         sx, sy = 2 * max(np.abs(extent[:2])), 2 * max(np.abs(extent[2:]))
         theta = np.arctan(sy / sx)
         Rlim = sy / (2 * np.sin(theta))
-        inds = np.argwhere((r < 20 * Rlim)).flatten()
+        fac = 20 if sphviewer else 2
+        inds = np.argwhere((r < fac * Rlim)).flatten()
         coords = coords_[inds]
         order = []
         for p in projection:
@@ -1264,9 +1285,11 @@ class Halo():
         coords[:, [0, 1, 2]] = coords[:, order]
         f_subh = plt.subplots(figsize=(8, 8))
         if cmap is None:
-            cmaps = ['magma', 'inferno', 'twilight_shifted',
-                     'twilight_shifted', 'cividis', 'twilight_shifted']
+            cmaps = [plt.cm.magma, plt.cm.inferno, plt.cm.twilight_shifted,
+                     plt.cm.twilight_shifted, plt.cm.cividis,
+                     plt.cm.twilight_shifted]
             cmap = cmaps[self.box.component]
+            cmap.set_bad('k', 1)
         if sphviewer:
             qv_parallel = QuickView(coords, r='infinity', plot=False,
                                     x=0, y=0, z=0, extent=list(extent))
@@ -1332,7 +1355,8 @@ class Halo():
 
     def plot_phase_space(self, outer_radius=4, kde=False, histogram=True,
                          bins=100, by_components=False, comoving_velocity=True,
-                         vlim=None, save=False, savefile=None):
+                         vlim=None, cmap=None, title=None, save=False,
+                         savefile=None):
 
         def phase_space(inds):
             coords, vels = self.relative_coords[inds], self.relative_vels[inds]
@@ -1378,19 +1402,28 @@ class Halo():
         else:
             r, vr = phase_space(interior)
             if histogram:
+                if cmap is None:
+                    cmaps = [plt.cm.magma, plt.cm.inferno,
+                             plt.cm.twilight_shifted, plt.cm.twilight_shifted,
+                             plt.cm.cividis, plt.cm.twilight_shifted]
+                    cmap = cmaps[self.box.component]
+                    cmap.set_bad('w', 1)
                 fps[1].hist2d(r/self.R_scale, vr, bins=bins,
-                              norm=mpl.colors.LogNorm())
+                              norm=mpl.colors.LogNorm(), cmap=cmap)
             else:
                 fps[1].scatter(r/self.R_scale, vr, alpha=0.5, marker='.', s=1,
                                color='C1')
             fps[1].spines['bottom'].set_position('zero')
             fps[1].spines['top'].set_color('none')
             fps[1].spines['right'].set_color('none')
-        fps[1].set_xlabel(r'$r/R_{200}$')
-        fps[1].set_ylabel(r'$v_r$')
         fps[1].set_xlim(0, outer_radius)
         if vlim is not None:
             fps[1].set_ylim(-vlim, vlim)
+        fps[1].set_xlabel(r'$r/R_{200}$')
+        fps[1].set_ylabel(r'$v_r$')
+        if title is None:
+            title = self.box.tags[self.box.component]
+        fps[0].suptitle(title)
         fps[0].tight_layout()
         if save:
             fps[0].savefig(savefile)
