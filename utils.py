@@ -2,6 +2,7 @@ import numpy as np
 from scipy.integrate import quad
 from scipy.interpolate import interp1d
 from sklearn.neighbors import KernelDensity
+from lmfit import Minimizer
 import tabulate
 
 
@@ -120,6 +121,49 @@ def magnitude(vec):
 def radial_velocity(coords, vels):
     rhat = magnitude(coords)[1]
     return np.sum(vels*rhat, axis=1).flatten()
+
+
+def fit_model(model, params, quantity, args, log=True, verbose=True):
+    """
+    Fit a specified model to some data.
+
+    Parameters
+    ----------
+    model : function
+        The model.
+    params : dict
+        The model parameters.
+    quantity : 1D array
+        The data to fit the model to.
+    args : dict
+        Arguments of the model function.
+    log : bool, optional
+        Fit in log space. The default is True.
+
+    Returns
+    -------
+    dict
+        The fit parameter values.
+
+    """
+
+    def residual(p, q, args, log=True):
+        if log:
+            return np.log10(q) - np.log10(model(p, **args))
+        else:
+            return q - model(p, **args)
+
+    func = Minimizer(residual, params, fcn_args=(quantity, args, log))
+
+    results = func.minimize()
+    fit_params = results.params
+
+    fit_param_keys = list(fit_params.keys())
+    if verbose:
+        pretty_print([fit_params[key].value for key in fit_param_keys],
+                     fit_param_keys, 'Fit results')
+
+    return fit_params
 
 
 def interpolate2D(data, kernel, bandwidth, resolution):

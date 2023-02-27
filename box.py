@@ -6,15 +6,15 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from sphviewer.tools import QuickView
-from lmfit import Minimizer
 from gadget4tools.utils import recenter, approx_concentration, pretty_print, \
-    to_physical_velocity, interpolate2D, magnitude, radial_velocity
+    to_physical_velocity, interpolate2D, magnitude, radial_velocity, fit_model
 
 
 class Box():
 
-    def __init__(self, path, snapshot, snapshot_prefix='snapshot',
-                 component=1, verbose=True):
+    def __init__(self, path, snapshot_prefix=None, snapshot=None,
+                 particle_type=1, to_physical=False, group_list=None,
+                 cutout='fof', cutout_radii=2, verbose=True):
         """
         Box object containing parameters and methods for the simulation box as
         a whole.
@@ -23,10 +23,10 @@ class Box():
         ----------
         path : str
             Directory containing the simulation output.
+        snapshot_prefix : str
+            The prefix of the snapshot files.
         snapshot : int
             Number of the desired snapshot.
-        snapshot_prefix : str, optional
-            The prefix of the snapshot files. The default is 'snapshot'.
         verbose : bool, optional
             Print all the things. The default is True.
 
@@ -35,31 +35,51 @@ class Box():
         self.path = path
         self.snapshot = snapshot
         self.snapshot_prefix = snapshot_prefix
-        self.component = component
+        self.particle_type = particle_type
 
-        file = path + '{}_{:03d}.hdf5'
-        if np.sort(glob.glob(file.format(snapshot_prefix,
-                                         snapshot))).size != 0:
-            self.read_snap(file.format(snapshot_prefix, snapshot), verbose)
+        file = path + '{}_{:03d}*.hdf5'
+
+        # print('Checking for halo catalogues...')
+        ncat = len(glob.glob(file.format('fof*_tab', snapshot)))
+        if ncat != 0:
+            # print('Found {} halo catalogue{}.'.format(
+            #     ncat, '' if ncat == 1 else 's'))
+            self.group, self.subhalo = self.read_groups(glob.glob(
+                file.format('fof*_tab', snapshot))[0], to_physical, verbose)
+        elif group_list is None:
+            print('No halo catalogues found.')
         else:
-            print('No snapshot files found.' +
-                  ' Attempting to read halo catalogues...')
-        if np.sort(glob.glob(file.format('fof_subhalo_tab',
-                                         snapshot))).size != 0:
-            self.group, self.subhalo = self.read_groups(file.format(
-                'fof_subhalo_tab', snapshot), verbose)
+            raise ValueError('You have entered a value for group_list but I' +
+                             ' cannot find any halo catalogues in the' +
+                             ' specified directory. Aborting.')
+
+        if snapshot is not None:
+            # print('\nChecking for snapshot files...')
+            nsnap = len(glob.glob(file.format(snapshot_prefix, snapshot)))
+            if nsnap != 0:
+                # print('Found {} snapshot file{}.'.format(
+                #     nsnap, '' if ncat == 1 else 's'))
+                self.read_snap(np.sort(glob.glob(file.format(snapshot_prefix,
+                                                 snapshot))), to_physical,
+                               group_list, cutout, cutout_radii, verbose)
+            else:
+                raise ValueError('No snapshot files found! Are you sure you' +
+                                 ' have specified the correct directory?')
+
+    def read_parameters(self, datafile, to_physical):
+
+        self.scale_phys = 1.0
+        if datafile['Parameters'].attrs['ComovingIntegrationOn'] == 1:
+            self.scale_factor = datafile['Header'].attrs['Time']
+            if to_physical:
+                self.scale_phys = self.scale_factor
         else:
-            raise ValueError('No snapshot or halo catalogue files found! Are' +
-                             ' you sure you have specified the correct' +
-                             ' directory?')
-
-    def read_parameters(self, datafile):
-
+            self.time = datafile['Header'].attrs['Time']
         self.redshift = datafile['Header'].attrs['Redshift']
-        self.box_size = datafile['Parameters'].attrs['BoxSize']
-        try:
+        self.box_size = datafile['Header'].attrs['BoxSize']
+        if 'NSample' in datafile['Parameters'].attrs:
             self.nsample = datafile['Parameters'].attrs['NSample']
-        except KeyError:
+        else:
             self.nsample = 1
         self.hubble_constant = datafile['Parameters'].attrs['HubbleParam']
         self.h = datafile['Parameters'].attrs['Hubble']
@@ -79,7 +99,8 @@ class Box():
         self.velocity_norm = self.unit_velocity / cmps_per_kmps
 
         self.OmegaDM = self.Omega0 - self.OmegaBaryon
-        self.mean_interparticle_spacing = self.box_size / self.nsample
+        self.mean_interparticle_spacing = self.box_size * self.scale_phys /\
+            self.nsample
         self.convergence_radius = 0.77 * \
             (3 * self.OmegaDM / (800 * np.pi))**(1/3) \
             * self.mean_interparticle_spacing / (1 + self.redshift)
@@ -89,7 +110,8 @@ class Box():
 
         return
 
-    def read_snap(self, filename, verbose):
+    def read_snap(self, filenames, to_physical, group_list, cutout,
+                  cutout_radii, verbose):
         """
         Read in snapshot contents.
 
@@ -104,32 +126,115 @@ class Box():
 
         if verbose:
             start = time.time()
-            print("LOADING {0}...".format(filename))
+            print(("  {}\n"*len(filenames)).format(*filenames))
 
-        snap = h5py.File(filename, 'r')
-        self.read_parameters(snap)
+        coords_all, vels_all, ids_all, masses_all = [], [], [], []
 
-        self.coords = snap['PartType{}'.format(self.component)][
-            'Coordinates'][()]
-        self.vels = snap['PartType{}'.format(self.component)][
-            'Velocities'][()]
-        self.ids = snap['PartType{}'.format(self.component)][
-            'ParticleIDs'][()]
-        self.ids_dm = snap['PartType1']['ParticleIDs'][()]
-        self.particle_mass = list(snap['Header'].attrs['MassTable'])[
-            self.component]
-        self.tags = ['Gas', 'Dark matter', 'Disk', 'Bulge', 'Stars',
-                     'Boundary']
+        if group_list is not None and cutout == 'fof':
+            offset = self.group['Offset']
+            offset_sel_start = offset[np.array(group_list)][..., np.newaxis]
+            offset_sel_end = offset[np.array(group_list)+1][..., np.newaxis]
+            offset_sel = np.concatenate((offset_sel_start, offset_sel_end),
+                                        axis=1)
+        for i, f in enumerate(filenames):
+            snap = h5py.File(f, 'r')
+            if i == 0:
+                self.read_parameters(snap, to_physical)
+
+            ids = snap['PartType{}'.format(self.particle_type)][
+                'ParticleIDs'][()]
+            coords = snap['PartType{}'.format(self.particle_type)][
+                'Coordinates'][()] * self.scale_phys
+            vels = snap['PartType{}'.format(self.particle_type)][
+                'Velocities'][()]
+            if to_physical:
+                vels = to_physical_velocity(vels, coords, self.redshift,
+                                            self.hubble_constant * self.h,
+                                            Omega_m=self.Omega0,
+                                            Omega_Lambda=self.OmegaLambda,
+                                            Omega_k=0)
+            if 'Masses' in list(snap['PartType{}'.format(self.particle_type)]):
+                masses = snap['PartType{}'.format(self.particle_type)][
+                    'Masses'][()]
+            else:
+                masses = list(snap['Header'].attrs['MassTable'])[
+                    self.particle_type] * np.ones(len(ids))
+
+            if group_list is None:
+                ids_all.append(ids)
+                coords_all.append(coords)
+                vels_all.append(vels)
+                masses_all.append(masses)
+            else:
+                if cutout == 'fof':
+                    offset_sel_ = offset_sel[np.argwhere(
+                        (offset_sel[:, 0] >= 0) |
+                        (offset_sel[:, 1] > 0)).flatten()]
+                    offset_sel_[np.argwhere(offset_sel_[:, 0] < 0), 0] = 0
+                    for idxs in offset_sel_:
+                        ids_all.append(ids[slice(*idxs)])
+                        coords_all.append(coords[slice(*idxs)])
+                        vels_all.append(vels[slice(*idxs)])
+                        masses_all.append(masses[slice(*idxs)])
+                    offset_sel -= len(ids)
+                elif cutout == 'sphere':
+                    positions = self.group['Pos'][np.array(group_list)]
+                    inds_all = []
+                    for i, pos in enumerate(positions):
+                        coords_rel = recenter(coords - pos, self.box_size *
+                                              self.scale_phys)
+                        radii = magnitude(coords_rel)[0]
+                        rcut = cutout_radii if (
+                            type(cutout_radii) == int or
+                            type(cutout_radii) == float) else cutout_radii[i]
+                        inds = np.argwhere(radii < rcut).flatten()
+                        inds_all.append(inds)
+                    inds_all = np.unique(np.hstack(inds_all))
+                    ids_all.append(ids[inds_all])
+                    coords_all.append(coords[inds_all])
+                    vels_all.append(vels[inds_all])
+                    masses_all.append(masses[inds_all])
+                elif cutout == 'cube':
+                    positions = self.group['Pos'][np.array(group_list)]
+                    R200s = self.group['R200'][np.array(group_list)]
+                    inds_all = []
+                    for i, pos in enumerate(positions):
+                        coords_rel = recenter(coords - pos, self.box_size *
+                                              self.scale_phys)
+                        rcut = cutout_radii if (
+                            type(cutout_radii) == int or
+                            type(cutout_radii) == float) else cutout_radii[i]
+                        rcut *= R200s[i]
+                        inds = np.argwhere((abs(coords_rel[:, 0]) < rcut) &
+                                           (abs(coords_rel[:, 1]) < rcut) &
+                                           (abs(coords_rel[:, 2]) < rcut)
+                                           ).flatten()
+                        inds_all.append(inds)
+                    inds_all = np.unique(np.hstack(inds_all))
+                    ids_all.append(ids[inds_all])
+                    coords_all.append(coords[inds_all])
+                    vels_all.append(vels[inds_all])
+                    masses_all.append(masses[inds_all])
+                else:
+                    raise ValueError('Value of cutout not recognized. Must' +
+                                     ' be either "fof" (friends-of-friends),' +
+                                     ' "sphere", or "cube".')
+        self.coords, self.vels, self.ids, self.masses = np.vstack(coords_all),\
+            np.vstack(vels_all), np.hstack(ids_all), np.hstack(masses_all)
+
+        tags = ['Gas', 'Dark matter', 'Disk', 'Bulge', 'Stars', 'Boundary']
+        self.tag = tags[self.particle_type]
+
         snap.close()
 
         if verbose:
             end = time.time()
-            print("...LOADED in {0} seconds\n".format(round(end-start, 2)))
+            print("...Loaded in {0} seconds\n".format(round(end-start, 2)))
             self.box_info()
 
         return
 
-    def read_groups(self, filename, verbose):
+    def read_groups(self, filename, to_physical, verbose):
         """
         Read in group and subhalo data.
 
@@ -149,21 +254,38 @@ class Box():
 
         """
 
-        subh = h5py.File(filename, 'r')
+        halo_cat = h5py.File(filename, 'r')
         if not hasattr(self, 'redshift'):
-            self.read_parameters(subh)
+            self.read_parameters(halo_cat, to_physical)
+
+        config_options = list(halo_cat['Config'].attrs)
 
         group = {}
-        group['R200'] = subh['Group']['Group_R_Crit200'][()]
-        group['R500'] = subh['Group']['Group_R_Crit500'][()]
-        group['M200'] = subh['Group']['Group_M_Crit200'][()]
-        group['M500'] = subh['Group']['Group_M_Crit500'][()]
-        group['Mass'] = subh['Group']['GroupMass'][()]
-        group['Pos'] = subh['Group']['GroupPos'][()]
-        group['Vel'] = subh['Group']['GroupVel'][()]
-        group['Len'] = subh['Group']['GroupLen'][()]
-        group['FirstSub'] = subh['Group']['GroupFirstSub'][()]
-        group['Nsubs'] = subh['Group']['GroupNsubs'][()]
+        group['R200'] = halo_cat['Group']['Group_R_Crit200'][()] * \
+            self.scale_phys
+        group['R500'] = halo_cat['Group']['Group_R_Crit500'][()] * \
+            self.scale_phys
+        group['M200'] = halo_cat['Group']['Group_M_Crit200'][()]
+        group['M500'] = halo_cat['Group']['Group_M_Crit500'][()]
+        group['Mass'] = halo_cat['Group']['GroupMassType'][()][
+            :, self.particle_type]
+        group['Pos'] = halo_cat['Group']['GroupPos'][()] * self.scale_phys
+        group['Vel'] = halo_cat['Group']['GroupVel'][()]
+        if to_physical:
+            group['Vel'] = to_physical_velocity(group['Vel'], group['Pos'],
+                                                self.redshift,
+                                                self.hubble_constant * self.h,
+                                                Omega_m=self.Omega0,
+                                                Omega_Lambda=self.OmegaLambda,
+                                                Omega_k=0)
+        group['Len'] = halo_cat['Group']['GroupLenType'][()][
+            :, self.particle_type]
+        group['Offset'] = halo_cat['Group']['GroupOffsetType'][()][
+            :, self.particle_type]
+        if 'SUBFIND' or 'SUBFIND_HBT' in config_options:
+            group['FirstSub'] = halo_cat['Group']['GroupFirstSub'][()]
+            group['Nsubs'] = halo_cat['Group']['GroupNsubs'][()]
+        self.number_of_groups = halo_cat['Header'].attrs['Ngroups_Total']
 
         np.seterr(divide='ignore', invalid='ignore')
         group['V200'] = np.sqrt(self.gravitational_constant * group['M200'] /
@@ -180,21 +302,38 @@ class Box():
                                          critical_density_500])
         np.seterr(divide='warn', invalid='warn')
 
-        subhalo = {}
-        subhalo['Mass'] = subh['Subhalo']['SubhaloMass'][()]
-        subhalo['CM'] = subh['Subhalo']['SubhaloCM'][()]
-        subhalo['Pos'] = subh['Subhalo']['SubhaloPos'][()]
-        subhalo['Vel'] = subh['Subhalo']['SubhaloVel'][()]
-        subhalo['HalfmassRad'] = subh['Subhalo']['SubhaloHalfmassRad'][()]
-        subhalo['Len'] = subh['Subhalo']['SubhaloLen'][()]
-        subhalo['IDMostbound'] = subh['Subhalo']['SubhaloIDMostbound'][()]
-        subhalo['SubhaloGroupNr'] = subh['Subhalo']['SubhaloGroupNr'][()]
-        subhalo['SubhaloRankInGr'] = subh['Subhalo']['SubhaloRankInGr'][()]
+        if 'SUBFIND' or 'SUBFIND_HBT' in config_options:
+            subhalo = {}
+            subhalo['Mass'] = halo_cat['Subhalo']['SubhaloMassType'][()][
+                :, self.particle_type]
+            subhalo['CM'] = halo_cat['Subhalo']['SubhaloCM'][()] * \
+                self.scale_phys
+            subhalo['Pos'] = halo_cat['Subhalo']['SubhaloPos'][()] * \
+                self.scale_phys
+            subhalo['Vel'] = halo_cat['Subhalo']['SubhaloVel'][()]
+            if to_physical:
+                subhalo['Vel'] = to_physical_velocity(
+                    subhalo['Vel'], subhalo['Pos'],
+                    self.redshift, self.hubble_constant * self.h,
+                    Omega_m=self.Omega0, Omega_Lambda=self.OmegaLambda,
+                    Omega_k=0)
+            subhalo['HalfmassRad'] = halo_cat['Subhalo'][
+                'SubhaloHalfmassRadType'][()][:, self.particle_type] * \
+                self.scale_phys
+            subhalo['Len'] = halo_cat['Subhalo']['SubhaloLenType'][()][
+                :, self.particle_type]
+            subhalo['Offset'] = halo_cat['Subhalo']['SubhaloOffsetType'][()][
+                :, self.particle_type]
+            subhalo['IDMostbound'] = halo_cat['Subhalo'][
+                'SubhaloIDMostbound'][()]
+            subhalo['SubhaloGroupNr'] = halo_cat['Subhalo'][
+                'SubhaloGroupNr'][()]
+            subhalo['SubhaloRankInGr'] = halo_cat['Subhalo'][
+                'SubhaloRankInGr'][()]
+            self.number_of_subhalos = halo_cat['Header'].attrs[
+                'Nsubhalos_Total']
 
-        subh.close()
-
-        self.number_of_groups = len(group['Pos'])
-        self.number_of_subhalos = len(subhalo['Pos'])
+        halo_cat.close()
 
         return group, subhalo
 
@@ -250,7 +389,10 @@ class Box():
         else:
             f_mass[0].show()
 
-    def plot_box(self, projection='xy', title=None, save=False, savefile=None):
+    def plot_box(self, projection='xy', center=[0, 0, 0], extent=None,
+                 sphviewer=False, bins=[1000, 1000], cmap=None, log=True,
+                 title=None, figsize=(8, 8), dpi=500, save=False,
+                 savefile=None, return_fig=False):
         """
         2D plot of the particle distribution.
 
@@ -267,21 +409,44 @@ class Box():
 
         """
 
-        width = self.box_size/2
-        coords = self.coords - np.array([width]*3)
+        width = self.box_size * self.scale_phys / 2
+        coords = self.coords - np.array([width]*3) - np.array(center)
+        if type(extent) == float or type(extent) == int:
+            extent = [extent, extent]
+        if extent is None:
+            extent = [width, width]
+        else:
+            if type(bins) == int:
+                bins = [bins, bins]
+            bins1 = np.linspace(-extent[0], extent[0], bins[0])
+            bins2 = np.linspace(-extent[1], extent[1], bins[1])
+            bins = [bins1, bins2]
         order = []
         for p in projection:
             order.append(
                 0 if p == 'x' else 1 if p == 'y' else 2 if p == 'z' else 3)
         order.append(list(set([0, 1, 2]) - set(order))[0])
         coords[:, [0, 1, 2]] = coords[:, order]
-        qv_parallel = QuickView(coords, r='infinity', plot=False,
-                                x=0, y=0, z=0, extent=[-width, width,
-                                                       -width, width])
-        f_box = plt.subplots(figsize=(8, 8))
-        f_box[1].imshow(qv_parallel.get_image(),
-                        extent=qv_parallel.get_extent(),
-                        cmap='inferno', origin='lower')
+        f_box = plt.subplots(figsize=figsize)
+        if cmap is None:
+            cmaps = [plt.cm.magma, plt.cm.inferno, plt.cm.twilight_shifted,
+                     plt.cm.twilight_shifted, plt.cm.cividis,
+                     plt.cm.twilight_shifted]
+            cmap = cmaps[self.particle_type]
+            cmap.set_bad('k', 1)
+        if sphviewer:
+            qv_parallel = QuickView(coords, r='infinity', plot=False,
+                                    x=0, y=0, z=0,
+                                    extent=[-extent[0], extent[0],
+                                            -extent[1], extent[1]])
+            norm = mpl.colors.LogNorm() if log else mpl.colors.Normalize()
+            f_box[1].imshow(qv_parallel.get_image(),
+                            extent=qv_parallel.get_extent(), cmap=cmap,
+                            origin='lower', norm=norm)
+        else:
+            norm = mpl.colors.LogNorm() if log else mpl.colors.Normalize()
+            f_box[1].hist2d(coords[:, 0], coords[:, 1], bins=bins,
+                            cmap=cmap, norm=norm)
         f_box[1].set_xlabel(r'{} ($h^{{{}}}$ Mpc)'.format(projection[0], '-1'))
         f_box[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(projection[1], '-1'))
         metadata = ['${{{}}}^3$ particles'.format(self.nsample),
@@ -293,6 +458,8 @@ class Box():
         f_box[0].tight_layout()
         if save:
             f_box[0].savefig(savefile, dpi=500)
+        elif return_fig:
+            return f_box
         else:
             f_box[0].show()
 
@@ -305,14 +472,12 @@ class Box():
         pretty_print([round(self.redshift, 3),
                       self.box_size * self.length_norm,
                       '{}^3'.format(self.nsample),
-                      round(self.particle_mass * self.mass_norm * 1e4, 5),
                       self.Omega0,
                       self.OmegaBaryon,
                       1-self.Omega0],
                      ['Redshift',
                       'Box size (Mpc)',
                       'Number of particles',
-                      'Particle mass (10^6 Msol)',
                       'Omega_0',
                       'Omega_Baryon',
                       'Omega_Lambda'],
@@ -349,7 +514,7 @@ class Halo():
             self.path = box.path
             self.snapshot = box.snapshot
             self.snapshot_prefix = box.snapshot_prefix
-            self.component = box.component
+            self.particle_type = box.particle_type
         else:
             raise ValueError("{} is not a \
                              gadget4tools.box.Box object".format(box))
@@ -370,7 +535,7 @@ class Halo():
             self.subhalo_index = None
             self.relative_coords = self.group_relative_coords
             self.relative_vels = self.group_relative_vels
-        if self.box.component == 1:
+        if self.box.particle_type == 1:
             self.get_halo_particle_positions_and_velocities()
         self.verbose = verbose
         if verbose and group_index is not None:
@@ -407,8 +572,16 @@ class Halo():
             self.group_number_of_subhalos]
 
         coords_rel = self.box.coords - self.group_position
-        self.group_relative_coords = recenter(coords_rel, self.box.box_size)
+        self.group_relative_coords = recenter(coords_rel, self.box.box_size *
+                                              self.box.scale_phys)
         self.group_relative_vels = self.box.vels - self.group_velocity
+
+        subhalo_pos_rel = self.group_subhalo_positions - self.group_position
+        self.group_subhalo_relative_coords = recenter(subhalo_pos_rel,
+                                                      self.box.box_size *
+                                                      self.box.scale_phys)
+        self.group_subhalo_relative_vels = self.group_subhalo_velocities -\
+            self.group_velocity
 
         self.V_200 = self.box.group['V200'][self.group_index]
         self.V_200 = self.box.group['V500'][self.group_index]
@@ -452,14 +625,16 @@ class Halo():
         self.subhalo_velocity = self.box.subhalo['Vel'][self.subhalo_index]
         self.subhalo_number_of_particles = self.box.subhalo['Len'][
             self.subhalo_index]
-        self.subhalo_index_most_bound = np.argwhere(
-            (self.box.ids_dm == self.box.subhalo['IDMostbound'][
-                self.subhalo_index])).flatten()[0]
+        if self.box.particle_type == 1:
+            self.subhalo_index_most_bound = np.argwhere(
+                (self.box.ids == self.box.subhalo['IDMostbound'][
+                    self.subhalo_index])).flatten()[0]
         self.subhalo_rank = self.box.subhalo['SubhaloRankInGr'][
             self.subhalo_index]
 
         coords_rel = self.box.coords - self.subhalo_position
-        self.subhalo_relative_coords = recenter(coords_rel, self.box.box_size)
+        self.subhalo_relative_coords = recenter(coords_rel, self.box.box_size *
+                                                self.box.scale_phys)
         self.subhalo_relative_vels = self.box.vels - self.subhalo_velocity
 
         self.R_scale = self.halfmass_radius
@@ -497,7 +672,7 @@ class Halo():
                 self.particle_relative_vels = index(self.particle_inds)
             self.number_of_particles = self.subhalo_number_of_particles
 
-        elif self.group_index is not None:
+        if self.group_index is not None:
             offset_group = self.group_number_of_particles
             self.particle_inds = np.arange(ind, ind + offset_group)
             self.particle_ids, self.particle_relative_coords, \
@@ -686,10 +861,12 @@ class Halo():
 
         """
 
+        # TODO: use varible particle masses in density profile calculation.
+
         self.histogram_halo(nbins, cutoff_radii, log=log)
 
         # if not hasattr(self, 'density_profile'):
-        self.density_profile = self.box.particle_mass * self.rhist / \
+        self.density_profile = np.mean(self.box.masses) * self.rhist / \
             ((4 * np.pi / 3) * (self.redge[1:]**3 - self.redge[:-1]**3))
 
         if model is not None:
@@ -701,9 +878,9 @@ class Halo():
                                 ' radius! Cannot perform reliable fit.')
             fit_radius = rad[inner:outer]
             fit_density = self.density_profile[inner:outer]
-            self.density_fit_params = self.fit_model(
+            self.density_fit_params = fit_model(
                 model[0], model[1], fit_density/self.box.critical_density,
-                {'r': fit_radius})
+                {'r': fit_radius}, verbose=self.verbose)
             self.density_profile_model = self.box.critical_density * \
                 model[0](self.density_fit_params, rad)
             self.c_200 = self.get_concentration(v=200)
@@ -725,9 +902,11 @@ class Halo():
 
         """
 
+        # TODO: use varible particle masses in mass profile calculation.
+
         self.histogram_halo(nbins, cutoff_radii)
 
-        self.mass_profile = self.box.particle_mass * np.cumsum(self.rhist)
+        self.mass_profile = np.mean(self.box.masses) * np.cumsum(self.rhist)
 
         if model is not None:
             rad = self.redge[1:]
@@ -739,9 +918,9 @@ class Halo():
                                 ' radius! Cannot perform reliable fit.')
             fit_radius = rad[inner:outer]
             fit_mass = self.mass_profile[inner:outer]
-            self.density_fit_params = self.fit_model(
+            self.density_fit_params = fit_model(
                 model[0], model[1], fit_mass/self.box.critical_density,
-                {'r': fit_radius})
+                {'r': fit_radius}, verbose=self.verbose)
             self.mass_profile_model = self.box.critical_density * model[0](
                 self.density_fit_params, rad)
 
@@ -795,21 +974,18 @@ class Halo():
             The velocity dispersion in the radial direction.
 
         """
-        v -= np.mean(v)
-
-        vsm = np.mean(v, axis=0)**2
-        vms = np.mean(v**2, axis=0)
-        disp = np.sqrt(np.sum(vms - vsm))
+        v -= np.mean(v, axis=0)
+        vsq = np.sum(v**2, axis=1)
+        disp = np.sqrt(np.mean(vsq, axis=0))
 
         if x is not None:
             vrad = radial_velocity(x, v)
-            vsmrad = np.mean(vrad)**2
-            vmsrad = np.mean(vrad**2)
-            disprad = np.sqrt(vmsrad - vsmrad)
+            vrad -= np.mean(vrad)
+            vradsq = np.sum(vrad**2, axis=1)
+            disprad = np.sqrt(np.mean(vradsq, axis=0))
+            return disp, disprad
         else:
-            disprad = []
-
-        return disp, disprad
+            return disp
 
     def calc_dispersion_profile(self, nbins, cutoff_radii, model=None,
                                 concentration=None, beta=None):
@@ -880,7 +1056,7 @@ class Halo():
 
         return
 
-    def calc_angular_momentum(self, v, x, specific=False):
+    def calc_angular_momentum(self, v, x, m=None, specific=False):
         """
         Calculate the angular momentum of a group of particles.
 
@@ -900,10 +1076,11 @@ class Halo():
             The angular momentum.
 
         """
+
         if specific:
             return np.sum(np.cross(x, v), axis=0) / len(x)
         else:
-            return self.box.particle_mass * np.sum(np.cross(x, v), axis=0)
+            return np.sum((m * np.cross(x, v).T).T, axis=0)
 
     def calc_angular_momentum_profile(self, nbins, cutoff_radii, model=None,
                                       proj=None, specific=False):
@@ -985,7 +1162,7 @@ class Halo():
 
         nrows = 1 + len(np.where([with_rsq, with_slope])[0])
         # f_dens = plt.subplots(nrows, 1, sharex=True, figsize=(6, nrows*6))
-        fig = plt.figure(figsize=(5, nrows*5))
+        fig = plt.figure(figsize=(5, nrows*5), dpi=300)
         rad = self.rcenter[:-1] / self.R_scale
 
         i = 1
@@ -1041,9 +1218,10 @@ class Halo():
             axes.append(ax3)
 
         for j, ax in enumerate(axes):
-            label = 'collisional' if j == 0 else None
-            ax.axvspan(xlim[0], self.box.convergence_radius/self.R_scale,
-                       color='r', alpha=0.3, label=label)
+            if self.box.nsample != 1:
+                label = 'collisional' if j == 0 else None
+                ax.axvspan(xlim[0], self.box.convergence_radius/self.R_scale,
+                           color='r', alpha=0.3, label=label)
             ax.set_xlim(xlim[0], xlim[1])
             ax.set_xscale('log')
             ax.set_xlabel(r'$r/R_{{{}}}$'.format(self.R_subscript))
@@ -1288,7 +1466,7 @@ class Halo():
             cmaps = [plt.cm.magma, plt.cm.inferno, plt.cm.twilight_shifted,
                      plt.cm.twilight_shifted, plt.cm.cividis,
                      plt.cm.twilight_shifted]
-            cmap = cmaps[self.box.component]
+            cmap = cmaps[self.box.particle_type]
             cmap.set_bad('k', 1)
         if sphviewer:
             qv_parallel = QuickView(coords, r='infinity', plot=False,
@@ -1313,7 +1491,7 @@ class Halo():
             projection[0], '-1'))
         f_subh[1].set_ylabel(r'{} ($h^{{{}}}$ Mpc)'.format(
             projection[1], '-1'))
-        if self.box.component == 1:
+        if self.box.particle_type == 1:
             metadata = ['{} particles'.format(self.number_of_particles),
                         '$R_{{{0}}}$ = {1} Mpc'.format(
                             self.R_subscript,
@@ -1344,7 +1522,7 @@ class Halo():
         for mi, m in enumerate(metadata):
             f_subh[0].text(0.12, 0.03*(mi+3.3), m, color='white')
         if title is None:
-            title = self.box.tags[self.box.component]
+            title = self.box.tag
         f_subh[0].suptitle(title)
         f_subh[0].tight_layout()
         f_subh[0].legend()
@@ -1406,7 +1584,7 @@ class Halo():
                     cmaps = [plt.cm.magma, plt.cm.inferno,
                              plt.cm.twilight_shifted, plt.cm.twilight_shifted,
                              plt.cm.cividis, plt.cm.twilight_shifted]
-                    cmap = cmaps[self.box.component]
+                    cmap = cmaps[self.box.particle_type]
                     cmap.set_bad('w', 1)
                 fps[1].hist2d(r/self.R_scale, vr, bins=bins,
                               norm=mpl.colors.LogNorm(), cmap=cmap)
@@ -1422,7 +1600,7 @@ class Halo():
         fps[1].set_xlabel(r'$r/R_{200}$')
         fps[1].set_ylabel(r'$v_r$')
         if title is None:
-            title = self.box.tags[self.box.component]
+            title = self.box.tag
         fps[0].suptitle(title)
         fps[0].tight_layout()
         if save:
@@ -1473,17 +1651,13 @@ class Halo():
             The potential at r.
 
         """
-        radii = np.sqrt(self.relative_coords[:, 0]**2 +
-                        self.relative_coords[:, 1]**2 +
-                        self.relative_coords[:, 2]**2)
+        radii = magnitude(self.relative_coords)[0]
         bins_outer = np.linspace(r, 10 * self.R_scale, nbins)
-        m_enc = self.box.particle_mass * \
-            len(np.argwhere((radii < r) & (radii > 0)))
+        m_enc = sum(self.box.masses[np.argwhere((radii < r) & (radii > 0))])
         int2 = 0
         for i in range(len(bins_outer) - 1):
-            dm = self.box.particle_mass *\
-                len(np.argwhere((radii < bins_outer[i+1]) &
-                                (radii > bins_outer[i])))
+            dm = sum(self.box.masses[np.argwhere((radii < bins_outer[i+1]) &
+                                                 (radii > bins_outer[i]))])
             r_ = (radii[i+1] + radii[i]) / 2
             int2 += dm / r_
         potential = -self.box.gravitational_constant * (m_enc / r + int2)
@@ -1491,47 +1665,58 @@ class Halo():
 
         return potential
 
-    def fit_model(self, model, params, quantity, args, log=True):
-        """
-        Fit a specified model to some data.
+    def calc_overdensity_mass_and_radius(self, overdensity=200):
+        radii = magnitude(self.relative_coords)[0]
 
-        Parameters
-        ----------
-        model : function
-            The model.
-        params : dict
-            The model parameters.
-        quantity : 1D array
-            The data to fit the model to.
-        args : dict
-            Arguments of the model function.
-        log : bool, optional
-            Fit in log space. The default is True.
+        def M(r):
+            return np.sum(self.box.masses[np.argwhere((radii < r))])
 
-        Returns
-        -------
-        dict
-            The fit parameter values.
+        ri = 0.01 * self.R_200
+        avg_density = M(ri) / (4 * np.pi * ri**3 / 3)
+        while avg_density > overdensity * self.box.critical_density:
+            ri += 0.01 * self.R_200
+            avg_density = M(ri) / (4 * np.pi * ri**3 / 3)
 
-        """
+        return M(ri), ri
 
-        def residual(p, q, args, log=True):
-            if log:
-                return np.log10(q) - np.log10(model(p, **args))
-            else:
-                return q - model(p, **args)
+    def calc_velocity_dispersion_mass(self, tracer='subhalos',
+                                      overdensity=None, radius=None):
 
-        func = Minimizer(residual, params, fcn_args=(quantity, args, log))
+        if overdensity is not None:
+            M, aperture = self.calc_overdensity_mass_and_radius(overdensity)
+        elif radius is not None:
+            aperture = radius
+            inds = np.argwhere(magnitude(self.relative_coords)[0]
+                               < radius).flatten()
+            M = sum(self.box.masses[inds])
 
-        results = func.minimize()
-        fit_params = results.params
+        if tracer == 'particles':
+            radii = magnitude(self.group_relative_coords)[0]
+            particles_interior = np.argwhere(radii < aperture)
+            particle_vel_disp = self.calc_velocity_dispersion(
+                self.group_relative_vels[particles_interior])[0]
+            Mvir = particle_vel_disp**2 * aperture / \
+                self.box.gravitational_constant
 
-        fit_param_keys = list(fit_params.keys())
-        if self.verbose:
-            pretty_print([fit_params[key].value for key in fit_param_keys],
-                         fit_param_keys, 'Fit results')
+        if tracer == 'subhalos':
+            radii = magnitude(self.group_subhalo_relative_coords)[0]
+            subhalos_interior = np.argwhere(radii < aperture).flatten()
+            subhalo_vel_disp = self.calc_velocity_dispersion(
+                self.group_subhalo_relative_vels[subhalos_interior])[0]
+            Mvir = subhalo_vel_disp**2 * aperture / \
+                self.box.gravitational_constant
 
-        return fit_params
+        return Mvir, M
+
+    def calc_center_of_mass(self, radius=None):
+        radii = magnitude(self.relative_coords)[0]
+        inds = np.argwhere(radii < radius).flatten()
+        com = np.sum((self.box.masses[inds] *
+                      self.relative_coords[inds].T).T, axis=0) / \
+            np.sum(self.box.masses[inds])
+        self.center_of_mass = com
+
+        return com
 
     def group_info(self):
         """
